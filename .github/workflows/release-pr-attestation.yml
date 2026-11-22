@@ -32,7 +32,8 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ${{ inputs.runs-on }}
-    # WHY: Two checkouts, a few API reads and one signing; 10 minutes as for the dependency review.
+    # WHY: A bound against hangs: two checkouts, a few API reads and one signing; the attestation jobs of the three
+    # repositories took at most 1.6 minutes.
     timeout-minutes: 10
 
     steps:

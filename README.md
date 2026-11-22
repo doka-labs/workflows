@@ -89,7 +89,7 @@ reviewed versions; that check lives in `tools/dependency_review/`.
 | `runs-on` | `ubuntu-26.04` | Runner label |
 | `fail-on-severity` | `high` | Lowest failing advisory severity |
 | `allow-licenses` | Apache-2.0, BSD-2-Clause, BSD-3-Clause, CC0-1.0, ISC, MIT, MIT-0, PostgreSQL, Unlicense | Allowed SPDX identifiers |
-| `license-exceptions` | `pkg:nuget/Microsoft.Data.SqlClient.SNI.runtime@6.0.3`, `pkg:nuget/Microsoft.Identity.Client.NativeInterop@0.20.6` | `pkg:nuget/Name@version` entries, comma-separated |
+| `license-exceptions` | `pkg:nuget/Microsoft.Data.SqlClient.SNI.runtime@6.0.3`, `pkg:nuget/Microsoft.Identity.Client.NativeInterop@0.20.6`, `pkg:nuget/SQLite@3.53.4` | `pkg:nuget/Name@version` entries, comma-separated |
 
 Caller with the defaults:
 
@@ -236,3 +236,106 @@ jobs:
     if: needs.guard.outputs.proceed == 'true'
     uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.2.0
 ```
+
+## Releases
+
+One `release-candidate.yml` per product repository, started by
+`workflow_dispatch` on a release line with the version. It calls these
+workflows, with the repository's own build, test and package jobs between
+them:
+
+1. `release-preflight.yml`: the run is on the current head of a line that may
+   qualify or publish the version, and `CHANGELOG.md` has a dated section for
+   it (`## [X.Y.Z] - YYYY-MM-DD` or `## X.Y.Z (YYYY-MM-DD)`). If a draft release
+   with a candidate exists for the version, `resume` is `true` and the run
+   continues with publication without repeating tests.
+2. The repository's jobs build, test and pack. They upload the TRX results and
+   one artifact with every `.nupkg`, its `.snupkg` and a `<PackageId>.spdx.json`.
+3. `release-qualification.yml` (see above).
+4. `release-candidate.yml`: checks package identity and source binding,
+   verifies each Portable PDB against its assembly (`tools/NuGetSymbols`),
+   attests build provenance and the SBOMs, and stores the candidate as a draft
+   release. The job summary shows the command to tag the commit.
+5. The maintainer pushes the SSH-signed annotated tag `v<version>`; signers
+   are listed in `.github/allowed_signers`.
+6. `release-publish.yml` in the publisher environment: after approval it
+   rechecks the assets against their attestations, the policy on `main`, the
+   environment grants and the signed tag, attests the admission, pushes what
+   nuget.org does not hold yet, reads every package back signed and every
+   Portable PDB from the symbol server, then publishes the immutable release.
+   If the readback is still pending after one hour, the job ends without
+   failure and re-running it continues.
+
+```yaml
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        type: string
+        required: true
+      qualification-only:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    permissions:
+      contents: write
+    uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v0.3.0
+    with:
+      version: ${{ inputs.version }}
+      qualification-only: ${{ inputs.qualification-only }}
+
+  build:
+    needs: preflight
+    if: needs.preflight.outputs.resume == 'false'
+    runs-on: ubuntu-26.04
+    steps:
+      - run: echo "Build, test, pack; upload test-results-* and the packages artifact."
+
+  qualification:
+    needs: [preflight, build]
+    if: needs.preflight.outputs.resume == 'false'
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: doka-labs/workflows/.github/workflows/release-qualification.yml@<commit-sha> # v0.3.0
+    with:
+      version: ${{ inputs.version }}
+      qualification-only: ${{ inputs.qualification-only }}
+      test-results-pattern: test-results-*
+
+  candidate:
+    needs: [preflight, qualification]
+    if: needs.preflight.outputs.resume == 'false' && !inputs.qualification-only
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    uses: doka-labs/workflows/.github/workflows/release-candidate.yml@<commit-sha> # v0.3.0
+    with:
+      version: ${{ inputs.version }}
+      packages-artifact: packages
+
+  publish:
+    needs: [preflight, candidate]
+    if: ${{ !cancelled() && !inputs.qualification-only && (needs.candidate.result == 'success' || needs.preflight.outputs.resume == 'true') }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: doka-labs/workflows/.github/workflows/release-publish.yml@<commit-sha> # v0.3.0
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
+    secrets:
+      NUGET_USER: ${{ secrets.NUGET_USER }}
+```
+

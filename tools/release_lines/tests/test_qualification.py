@@ -242,7 +242,8 @@ class AttestationTests(unittest.TestCase):
 
     def test_verify_reads_predicate_and_run_identity(self):
         # Arrange
-        output = ('[{"verificationResult": {"statement": {"predicateType": "%s", "predicate": {"tree": "t"}}, '
+        output = ('[{"verificationResult": {"statement": {"predicateType": "%s", "predicate": {"tree": "t"}, '
+                  '"subject": [{"name": "git-tree-t.txt", "digest": {"sha256": "ab"}}]}, '
                   '"signature": {"certificate": {"runInvocationURI": '
                   '"https://github.com/doka-labs/Example/actions/runs/42/attempts/3", "sourceRepositoryDigest": "d", '
                   '"sourceRepositoryRef": "refs/pull/1/merge"}}}}]' % attestation.PR_QUALIFICATION)
@@ -257,8 +258,8 @@ class AttestationTests(unittest.TestCase):
         result = attestation.verify(Path("s"), "doka-labs/Example", attestation.PR_QUALIFICATION, run=run)
 
         # Assert
-        self.assertEqual([(42, 3, {"tree": "t"})], [(item["runId"], item["attempt"], item["predicate"])
-                                                     for item in result])
+        self.assertEqual([(42, 3, {"tree": "t"}, {"git-tree-t.txt": "ab"})],
+                         [(item["runId"], item["attempt"], item["predicate"], item["subjects"]) for item in result])
 
     def test_attestation_of_other_repository_fails(self):
         # Arrange

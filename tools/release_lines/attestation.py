@@ -21,11 +21,16 @@ PR_QUALIFICATION = f"{PREDICATE_BASE}/pr-qualification-v1.md"
 RELEASE_LINE_SNAPSHOT = f"{PREDICATE_BASE}/release-line-snapshot-v1.md"
 RELEASE_QUALIFICATION = f"{PREDICATE_BASE}/release-qualification-v1.md"
 RELEASE_ADMISSION = f"{PREDICATE_BASE}/release-admission-v1.md"
+# WHY: The default predicate type of gh attestation verify ("default https://slsa.dev/provenance/v1") and the type
+# of the provenance actions/attest writes, as in the release attestations of cli/cli 2.103.3.
+# https://cli.github.com/manual/gh_attestation_verify
+SLSA_PROVENANCE = "https://slsa.dev/provenance/v1"
 SIGNERS = {
     PR_QUALIFICATION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-pr-attestation.yml",
     RELEASE_LINE_SNAPSHOT: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-qualification.yml",
     RELEASE_QUALIFICATION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-qualification.yml",
     RELEASE_ADMISSION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-publish.yml",
+    SLSA_PROVENANCE: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-candidate.yml",
 }
 TREE = re.compile(r"[0-9a-f]{40}\Z")
 RUN_URI = re.compile(r"https://github\.com/([^/]+/[^/]+)/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)\Z")
@@ -44,15 +49,24 @@ def tree_subject(directory: Path, tree: str) -> Path:
     return path
 
 
-def verify(subject: Path, repository: str, predicate_type: str, *, run=subprocess.run) -> list[dict]:
-    """Verify all attestations of a subject for a predicate type and return them with their run identity."""
+def verify(subject: Path, repository: str, predicate_type: str, *, signer: str | None = None,
+           source_digest: str | None = None, source_ref: str | None = None, run=subprocess.run) -> list[dict]:
+    """Verify all attestations of a subject for a predicate type and return them with run identity and subjects."""
     command = ["gh", "attestation", "verify", str(subject), "--repo", repository,
-               "--predicate-type", predicate_type, "--signer-workflow", SIGNERS[predicate_type],
+               "--predicate-type", predicate_type, "--signer-workflow", signer or SIGNERS[predicate_type],
                "--deny-self-hosted-runners", "--format", "json"]
+    # WHY: --source-digest and --source-ref "Enforce that the digest / git ref associated with the source repository
+    # matches the provided value". https://cli.github.com/manual/gh_attestation_verify
+    if source_digest:
+        command.extend(["--source-digest", source_digest])
+
+    if source_ref:
+        command.extend(["--source-ref", source_ref])
+
     completed = run(command, capture_output=True, text=True, timeout=120, check=False)
+    label = predicate_type.rsplit("/", 1)[-1]
     if completed.returncode:
-        raise GitHubError(f"No valid {predicate_type.rsplit('/', 1)[-1]} attestation for {subject.name}.",
-                          code="failed")
+        raise GitHubError(f"No valid {label} attestation for {subject.name}.", code="failed")
 
     try:
         entries = json.loads(completed.stdout)
@@ -64,19 +78,45 @@ def verify(subject: Path, repository: str, predicate_type: str, *, run=subproces
         statement = entry.get("verificationResult", {}).get("statement", {})
         certificate = entry.get("verificationResult", {}).get("signature", {}).get("certificate", {})
         run_uri = RUN_URI.fullmatch(certificate.get("runInvocationURI", ""))
+        subjects = statement.get("subject")
         if (statement.get("predicateType") != predicate_type or not isinstance(statement.get("predicate"), dict)
-                or run_uri is None or run_uri[1] != repository):
-            raise GitHubError("A verified attestation lacks its predicate or run identity.", code="failed")
+                or run_uri is None or run_uri[1] != repository or not isinstance(subjects, list)):
+            raise GitHubError("A verified attestation lacks its predicate, subjects or run identity.", code="failed")
 
         result.append({"predicate": statement["predicate"], "runId": int(run_uri[2]), "attempt": int(run_uri[3]),
                        "sourceDigest": certificate.get("sourceRepositoryDigest"),
-                       "sourceRef": certificate.get("sourceRepositoryRef")})
+                       "sourceRef": certificate.get("sourceRepositoryRef"),
+                       "subjects": {item.get("name"): item.get("digest", {}).get("sha256") for item in subjects
+                                    if isinstance(item, dict)}})
 
     if not result:
-        raise GitHubError(f"No valid {predicate_type.rsplit('/', 1)[-1]} attestation for {subject.name}.",
-                          code="failed")
+        raise GitHubError(f"No valid {label} attestation for {subject.name}.", code="failed")
 
     return result
+
+
+def exists(api, repository: str, subject: Path) -> bool:
+    """Return whether any attestation names the subject; a failed read raises instead of meaning none."""
+    # WHY: GitHub answers 404 for a repository without attestations and 200 with an empty list for one without
+    # attestations of this digest (observed for doka-labs and cli/cli); any other answer proves nothing, and a
+    # failed read must never count as absence (SafeMigrations latest.py, release run 42767338686 attempt 2).
+    # https://docs.github.com/en/rest/repos/attestations#list-attestations
+    import hashlib
+
+    digest = hashlib.sha256(subject.read_bytes()).hexdigest()
+    try:
+        response = api.request(f"repos/{repository}/attestations/sha256:{digest}?per_page=1")
+    except GitHubError as error:
+        if error.code == "github_http_error" and error.http_status == 404:
+            return False
+
+        raise
+
+    entries = response.get("attestations") if isinstance(response, dict) else None
+    if not isinstance(entries, list):
+        raise GitHubError("The attestation listing is invalid.", code="github_invalid_response")
+
+    return bool(entries)
 
 
 def latest(attestations: list[dict]) -> dict:

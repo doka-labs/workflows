@@ -34,7 +34,9 @@ class ToolchainError(RuntimeError):
 
 def stage_of(version: policies.ReleaseVersion) -> str:
     """Return ga, preview or rc for a version; other prerelease labels are not reviewed stages."""
-    # WHY: .NET and EF Core prereleases are labeled preview.N and rc.N; the three repositories accept only these.
+    # WHY: .NET prereleases carry "-preview.[number].[build]" (https://learn.microsoft.com/dotnet/core/versions/) and
+    # release candidates rc.N (for example SDK 11.0.100-rc.1.26425.128, EF Core 11.0.0-rc.2 in GHSA-846f-f764-76mx);
+    # the three repositories accept only these two stages.
     if not version.is_prerelease:
         return "ga"
 
@@ -291,7 +293,8 @@ def check_lockfile(path: Path, root: Path, frameworks: list[str], patterns: list
             if not matches(name, patterns):
                 continue
 
-            # WHY: Project references in a lockfile carry no resolved package version.
+            # WHY: Project references appear in a lockfile with "type": "Project" and no resolved version (SafeMigrations
+            # src/*/packages.lock.json).
             if isinstance(metadata, dict) and metadata.get("type") == "Project":
                 continue
 

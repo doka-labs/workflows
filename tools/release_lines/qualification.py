@@ -66,8 +66,10 @@ def run_jobs(api, repository: str, run_id: str) -> list[dict]:
 
 def require_gate_jobs(jobs: list[dict], names: list[str]) -> list[dict]:
     """Require every gate job, including all of its matrix rows, to have succeeded in this run."""
-    # WHY: GitHub names a job of a called workflow "<caller job> / <job>" and a matrix row "<job> (<values>)";
-    # skipped is not success (MySql's selection rule).
+    # WHY: GitHub names a job of a called workflow "<caller job> / <job>" and a matrix row "<job> (<values>)", as the
+    # job listings show (NestedSet run 44952104737 "Qualification / SQLite integration tests", MySql
+    # "qualification / spec-test-suite (mysql84)"); the documentation does not describe the format. Skipped is not
+    # success (MySql's selection rule).
     result = []
     for name in names:
         matches = [job for job in jobs if job.get("name") == name or str(job.get("name", "")).startswith(f"{name} (")]
@@ -110,8 +112,8 @@ def pr_predicate(api, policy: dict, environment: dict, event: dict, root: Path) 
 
 def test_projects(root: Path) -> dict[str, str]:
     """Return the test projects of a restored checkout as assembly name to relative project path."""
-    # WHY: Whether a project is a test project is decided by MSBuild evaluation (IsTestProject=true, set by the
-    # test SDK packages), not by the project XML: MySql has helper and smoke projects without the property, and
+    # WHY: Whether a project is a test project is decided by MSBuild evaluation (IsTestProject=true, set for example
+    # by Microsoft.NET.Test.Sdk.props), not by the project XML: MySql has helper and smoke projects without the property, and
     # NestedSet's shared Specification.Tests library evaluates to false.
     result = {}
     for project in source_projects(root):
@@ -158,7 +160,8 @@ def read_trx(path: Path) -> list[dict]:
         if identity not in assemblies:
             raise QualificationError(f"{path.name} has a result without a test definition.")
 
-        # WHY: xUnit writes the skip reason of a NotExecuted result to Output/ErrorInfo/Message.
+        # WHY: xUnit writes the skip reason of a NotExecuted result to Output/ErrorInfo/Message, as in MySql's TRX of
+        # run 44491092524 (327 skipped tests, all with a reason there); the TRX format has no public specification.
         message = result.find(f"{TRX_NAMESPACE}Output/{TRX_NAMESPACE}ErrorInfo/{TRX_NAMESPACE}Message")
         results.append({"testId": identity, "outcome": result.get("outcome"), "assembly": assemblies[identity],
                         "reason": (message.text or "").strip() if message is not None else ""})

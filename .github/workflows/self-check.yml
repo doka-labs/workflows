@@ -46,13 +46,19 @@ jobs:
   tests:
     name: Tool Tests
     runs-on: ubuntu-26.04
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      # WHY: The tests build the NuGetSymbols tool and run it against a freshly packed library.
+      - name: Set up the .NET SDK of this repository
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
 
       - name: Run the tool tests
         run: python3 -E -s -m unittest discover -s tools -p 'test_*.py' -t . -v

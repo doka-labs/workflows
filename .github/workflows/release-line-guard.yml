@@ -39,7 +39,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ inputs.runs-on }}
-    # WHY: The guard job limit of SafeMigrations and NestedSet.
+    # WHY: A bound against hangs: the guard jobs (schedule-identity) of SafeMigrations took at most 0.2 minutes in
+    # 19 successful runs; 5 minutes is the limit of SafeMigrations and NestedSet.
     timeout-minutes: 5
     outputs:
       proceed: ${{ steps.decide.outputs.proceed }}

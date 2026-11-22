@@ -23,7 +23,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ inputs.runs-on }}
-    # WHY: The check reads a few files without network access besides one API read; 5 minutes as for the guard.
+    # WHY: A bound against hangs: the check reads a few files and, on pull requests, the policy on main through
+    # the API, like the guard (at most 0.2 minutes measured).
     timeout-minutes: 5
 
     steps:

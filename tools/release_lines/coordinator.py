@@ -172,7 +172,8 @@ def verify_jobs(api, repository: str, run_id: int, required: list[str]) -> None:
         if job.get("conclusion") not in ("success", "skipped"):
             raise GitHubError(f"Job '{job['name']}' ended with an unaccepted conclusion.", code="jobs_unsuccessful")
 
-    # WHY: GitHub names matrix jobs "<job> (<values>)"; every row of a required job must succeed (MySql's rule).
+    # WHY: GitHub names matrix jobs "<job> (<values>)", as in MySql "qualification / spec-test-suite (mysql84)";
+    # every row of a required job must succeed (MySql's rule).
     for name in required:
         matches = [job for job in jobs if job["name"] == name or job["name"].startswith(f"{name} (")]
         if not matches or any(job.get("conclusion") != "success" for job in matches):

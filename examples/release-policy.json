@@ -5,7 +5,8 @@
   "authorityRef": "refs/heads/main",
   "release": {
     "workflowPath": ".github/workflows/release-candidate.yml",
-    "environment": "nuget"
+    "environment": "nuget",
+    "packages": ["Doka.Example", "Doka.Example.Extensions"]
   },
   "toolchain": {
     "frameworkPackages": ["Microsoft.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.*"],

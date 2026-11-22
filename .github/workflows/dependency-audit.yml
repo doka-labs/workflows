@@ -34,7 +34,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ inputs.runs-on }}
-    # WHY: The audit job limit of MySql, SafeMigrations and NestedSet.
+    # WHY: A bound against hangs, not an expected duration: the audit jobs of MySql, SafeMigrations and NestedSet
+    # took at most 1.9 minutes in 65 successful runs (November 2026); 45 minutes is their common limit.
     timeout-minutes: 45
 
     steps:

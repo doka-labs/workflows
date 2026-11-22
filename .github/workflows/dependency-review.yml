@@ -39,14 +39,20 @@ on:
           Comma-separated NuGet package URLs with exact versions (pkg:nuget/Name@1.2.3) whose
           reviewed license files replace an SPDX expression. Any other version of these packages fails.
         type: string
-        # WHY: Both packages declare <license type="file"> instead of an SPDX expression in their nuspec on
+        # WHY: These packages declare <license type="file"> instead of an SPDX expression in their nuspec on
         # nuget.org, so the action cannot match them against allow-licenses. Their license files were reviewed at
-        # exactly these versions.
+        # exactly these versions; another version fails until it is reviewed.
         # https://api.nuget.org/v3-flatcontainer/microsoft.data.sqlclient.sni.runtime/6.0.3/microsoft.data.sqlclient.sni.runtime.nuspec
         # https://api.nuget.org/v3-flatcontainer/microsoft.identity.client.nativeinterop/0.20.6/microsoft.identity.client.nativeinterop.nuspec
+        # SQLite 3.53.4 (pulled in by Microsoft.EntityFrameworkCore.Sqlite 11.0.0 through
+        # SQLitePCLRaw.bundle_e_sqlite3 3.0.5) also declares a license file; it reads "SQLite is Public Domain", which
+        # sqlite.org confirms. GitHub reports it as LicenseRef-github-OTHER (SafeMigrations run 45058900529).
+        # https://api.nuget.org/v3-flatcontainer/sqlite/3.53.4/sqlite.nuspec
+        # https://sqlite.org/copyright.html
         default: >-
           pkg:nuget/Microsoft.Data.SqlClient.SNI.runtime@6.0.3,
-          pkg:nuget/Microsoft.Identity.Client.NativeInterop@0.20.6
+          pkg:nuget/Microsoft.Identity.Client.NativeInterop@0.20.6,
+          pkg:nuget/SQLite@3.53.4
 
 permissions:
   contents: read
@@ -57,7 +63,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ inputs.runs-on }}
-    # WHY: The review job limit of MySql, SafeMigrations and NestedSet.
+    # WHY: A bound against hangs: the review jobs of MySql and NestedSet took at most 3.4 minutes in 65 successful
+    # runs, including the action's wait for snapshots (180 seconds); 10 minutes is their common limit.
     timeout-minutes: 10
 
     # WHY: The action reads the dependency graph through the API; it reads local files only for a config-file,
@@ -82,13 +89,16 @@ jobs:
           fail-on-severity: ${{ inputs.fail-on-severity }}
           allow-licenses: ${{ inputs.allow-licenses }}
           allow-dependencies-licenses: ${{ inputs.license-exceptions }}
-          # WHY: A PR comment would need pull-requests: write; the result is the check itself.
+          # WHY: "If enabled, you must give the workflow or job the pull-requests: write permission"; the result
+          # is the check itself. https://github.com/actions/dependency-review-action#configuration-options
           comment-summary-in-pr: never
           # WHY: OpenSSF Scorecard is not part of the shared standard; the action's default is true.
+          # https://github.com/actions/dependency-review-action#configuration-options
           show-openssf-scorecard: false
           # WHY: The dependency graph of a new commit can arrive after the review starts; the action retries every
           # 10 seconds up to the timeout instead of failing on incomplete snapshots. 180 seconds is the value of
           # MySql, SafeMigrations and NestedSet; the action's default is 120.
+          # https://github.com/actions/dependency-review-action#configuration-options
           retry-on-snapshot-warnings: true
           retry-on-snapshot-warnings-timeout: 180
 

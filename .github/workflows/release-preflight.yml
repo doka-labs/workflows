@@ -1,0 +1,87 @@
+name: Release Preflight
+
+# First job of a release run: the run is a workflow_dispatch on the current
+# head of a line that may qualify or publish this version, and CHANGELOG.md has
+# its notes. If a draft release with a candidate already exists for the
+# version, the run resumes at publication without repeating qualification.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Candidate package version.
+        type: string
+        required: true
+      qualification-only:
+        description: Qualify without permitting publication.
+        type: boolean
+        default: false
+      runs-on:
+        description: Runner label.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+    outputs:
+      resume:
+        description: A valid draft exists; skip qualification and candidate and continue with publication.
+        value: ${{ jobs.preflight.outputs.resume }}
+      tag:
+        description: Release tag of the version.
+        value: ${{ jobs.preflight.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    # WHY: "Only users with push access will receive listings for draft releases"; the preflight must see drafts.
+    # https://docs.github.com/en/rest/releases/releases#list-releases
+    permissions:
+      contents: write
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: the preflight jobs of MySql and NestedSet took at most 0.8 minutes in 32
+    # successful runs; 10 minutes is NestedSet's limit.
+    timeout-minutes: 10
+    outputs:
+      resume: ${{ steps.preflight.outputs.resume }}
+      tag: ${{ steps.preflight.outputs.tag }}
+
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: Checkout removes its credentials, and GitHub "may temporarily require authentication for some clones
+      # and fetches of public repositories over HTTPS"; NestedSet's publication failed with HTTP 403 on such a read
+      # (run 44952104737). The helper lends the job token to Git without storing it.
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      - name: Authenticate Git reads with the job token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh auth setup-git --hostname github.com
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Check line, version, notes and an existing draft
+        id: preflight
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          QUALIFICATION_ONLY: ${{ inputs.qualification-only }}
+        run: >-
+          python3 -E -s -m tools.release_publication preflight --root "$GITHUB_WORKSPACE/repository"
+          --version "$VERSION" --qualification-only "$QUALIFICATION_ONLY"

@@ -23,7 +23,7 @@ AUTHORITY_REF = "refs/heads/main"
 MAX_POLICY_BYTES = 1024 * 1024
 POLICY_FIELDS = {"schemaVersion", "revision", "repository", "authorityRef", "release", "toolchain", "lines",
                  "workloads", "qualification"}
-RELEASE_FIELDS = {"workflowPath", "environment"}
+RELEASE_FIELDS = {"workflowPath", "environment", "packages"}
 TOOLCHAIN_FIELDS = {"frameworkPackages", "majorCeilingPackages", "coherentGroups", "lockfiles", "expectedLockfiles",
                     "versionPrefix", "coupling"}
 LINE_FIELDS = {"sourceRef", "role", "packageMajor", "channel", "upstreamStage", "state"}
@@ -305,6 +305,10 @@ def validate_policy(value: Any, *, repository: str | None = None) -> dict:
 
     if not isinstance(release["environment"], str) or IDENTIFIER.fullmatch(release["environment"]) is None:
         raise PolicyError("Release environment must be a lowercase identifier.")
+
+    # WHY: The package IDs let the preflight prove the version unused on nuget.org before the long test runs
+    # (NestedSet's check_unused_version) and let the candidate reject unexpected packages.
+    _strings(release["packages"], re.compile(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\Z"), "Release packages")
 
     _toolchain(policy["toolchain"])
     _lines(policy["lines"])
