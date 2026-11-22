@@ -9,9 +9,11 @@ import sys
 from pathlib import Path
 
 from tools.release_lines import attestation
+from tools.release_lines.coordinator import observe_authority
+from tools.release_lines.toolchain import target_frameworks
 from tools.release_lines.github import GitHub, GitHubError
 from tools.release_lines.policy import PolicyError
-from tools.release_publication import nuget, packages, publication
+from tools.release_publication import consumers, nuget, packages, publication
 
 
 def _output(name: str, value: str) -> None:
@@ -38,12 +40,26 @@ def main(argv: list[str] | None = None) -> int:
     preflight.add_argument("--root", type=Path, required=True)
     preflight.add_argument("--version", required=True)
     preflight.add_argument("--qualification-only", choices=("true", "false"), required=True)
+    sbom = commands.add_parser("sbom")
+    sbom.add_argument("--root", type=Path, required=True)
+    sbom.add_argument("--version", required=True)
+    sbom.add_argument("--packages", type=Path, required=True)
+    sbom.add_argument("--tool", type=Path, required=True)
+    sbom.add_argument("--supplier", required=True)
+    sbom.add_argument("--output", type=Path, required=True)
+    public = commands.add_parser("public-consumers")
+    public.add_argument("--root", type=Path, required=True)
+    public.add_argument("--candidate", type=Path, required=True)
+    public.add_argument("--output", type=Path, required=True)
     candidate = commands.add_parser("candidate")
     candidate.add_argument("--root", type=Path, required=True)
     candidate.add_argument("--version", required=True)
     candidate.add_argument("--packages", type=Path, required=True)
     candidate.add_argument("--probes", type=Path, required=True)
     candidate.add_argument("--output", type=Path, required=True)
+    pre_tag = commands.add_parser("pre-tag", help="Check locally that the checkout can be tagged; no writes.")
+    pre_tag.add_argument("--root", type=Path, default=Path.cwd())
+    pre_tag.add_argument("--version", required=True)
     stage = commands.add_parser("stage")
     stage.add_argument("--candidate", type=Path, required=True)
     recheck = commands.add_parser("recheck")
@@ -77,14 +93,41 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result, sort_keys=True))
             return 0
 
+        if args.command == "sbom":
+            root = args.root.resolve()
+            policy = observe_authority(api, environment["GITHUB_REPOSITORY"])["policy"]
+
+            inventory = packages.inventory(args.packages.resolve(), args.version, environment["GITHUB_REPOSITORY"],
+                                           environment["GITHUB_SHA"],
+                                           target_frameworks(root, policy["toolchain"]["coupling"]))
+            result = consumers.generate(args.packages.resolve(), inventory, args.version, args.tool.resolve(),
+                                        root / "global.json", environment["GITHUB_REPOSITORY"], args.supplier,
+                                        args.output.resolve())
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "public-consumers":
+            manifest = publication.read_json(args.candidate.resolve() / publication.CANDIDATE)
+            result = consumers.verify_public(args.candidate.resolve(), manifest["packages"], manifest["version"],
+                                             args.root.resolve() / "global.json", args.output.resolve())
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
         if args.command == "candidate":
             manifest = publication.candidate(api, environment, args.root.resolve(), version=args.version,
                                              directory=args.packages.resolve(), probes=args.probes.resolve(),
                                              output=args.output.resolve())
             _output("packages", json.dumps([item["id"] for item in manifest["packages"]]))
-            _summary(f"## Release candidate {manifest['version']}\n\nTag the qualified commit with an SSH-signed "
-                     f"annotated tag, push it, then approve the publication:\n\n```sh\ngit tag -s {manifest['tag']} "
-                     f"{manifest['commit']} -m \"{manifest['tag']}\"\ngit push origin {manifest['tag']}\n```\n")
+            _summary(f"## Release candidate {manifest['version']}\n\nCheck locally with `python3 -E -s -m "
+                     f"tools.release_publication pre-tag --version {manifest['version']}`, tag the qualified commit "
+                     f"with an SSH-signed annotated tag, push the tag to origin, then approve the publication:"
+                     f"\n\n```sh\ngit tag -s {manifest['tag']} {manifest['commit']} -m \"{manifest['tag']}\"\n```\n")
+            return 0
+
+        if args.command == "pre-tag":
+            result = publication.pre_tag(api, args.root.resolve(), args.version)
+            print(f"Ready to tag {result['tag']} at {result['commit']}:\n  {result['command']}\n"
+                  f"Then push the tag {result['tag']} to origin.")
             return 0
 
         if args.command == "stage":
@@ -144,8 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         released = publication.publish_release(api, environment["GITHUB_REPOSITORY"], manifest, args.candidate.resolve())
         _summary(f"## Released {manifest['tag']}\n\n{released.get('html_url', '')}")
         return 0
-    except (publication.PublicationError, packages.PackageError, nuget.NuGetError, PolicyError, GitHubError,
-            OSError, ValueError) as error:
+    except (publication.PublicationError, packages.PackageError, nuget.NuGetError, consumers.ConsumerError,
+            PolicyError, GitHubError, OSError, ValueError, KeyError) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
 

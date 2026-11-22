@@ -1,9 +1,11 @@
 name: Release Candidate
 
 # Turns the qualified commit's built packages into a release candidate: checks
-# their identity and source binding, derives the symbol-server probes, attests
-# build provenance and one SBOM per package, and stores everything as assets
-# of a draft release. A draft does not expire and stays out of public view.
+# their identity and source binding, restores each package in an isolated
+# consumer from the candidate bytes, derives one SBOM per package from that
+# consumer, derives the symbol-server probes, attests build provenance and the
+# SBOMs, and stores everything as assets of a draft release. A draft does not
+# expire and stays out of public view.
 
 on:
   workflow_call:
@@ -13,10 +15,14 @@ on:
         type: string
         required: true
       packages-artifact:
-        description: >-
-          Artifact of this run with every .nupkg, its .snupkg and an SPDX SBOM <PackageId>.spdx.json per package.
+        description: Artifact of this run with every .nupkg and its .snupkg.
         type: string
         required: true
+      sbom-supplier:
+        description: Supplier named in each SBOM.
+        type: string
+        # WHY: The supplier NestedSet names in its SBOMs.
+        default: Doka Labs
       runs-on:
         description: Runner label.
         type: string
@@ -71,6 +77,35 @@ jobs:
           name: ${{ inputs.packages-artifact }}
           path: ${{ runner.temp }}/packages
 
+      # WHY: sbom-tool 4.1.5 is the release NestedSet runs and the newest release; the self-contained binary needs
+      # no tool installation, and the digest is the one GitHub reports for the release asset.
+      # https://github.com/microsoft/sbom-tool/releases/tag/v4.1.5
+      - name: Install sbom-tool 4.1.5
+        env:
+          SHA256: bf5d4f99bc98c119d549d08fc02ae92598a7a42772f17317c01031a92632e05b
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom-tool"
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/sbom-tool/sbom-tool" \
+            https://github.com/microsoft/sbom-tool/releases/download/v4.1.5/sbom-tool-linux-x64
+          echo "$SHA256  $RUNNER_TEMP/sbom-tool/sbom-tool" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/sbom-tool/sbom-tool"
+
+      # WHY: Component detection and NuGet write scratch files to TMPDIR, and the self-contained binary may extract
+      # its runtime; both stay in the job's temp directory (NestedSet's generate-sbom.sh).
+      - name: Restore isolated consumers and generate the SBOMs
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SUPPLIER: ${{ inputs.sbom-supplier }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom-scratch" "$RUNNER_TEMP/sbom-bundle"
+          TMPDIR="$RUNNER_TEMP/sbom-scratch" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$RUNNER_TEMP/sbom-bundle" \
+            python3 -E -s -m tools.release_publication sbom --root "$GITHUB_WORKSPACE/repository" \
+            --version "$VERSION" --packages "$RUNNER_TEMP/packages" --tool "$RUNNER_TEMP/sbom-tool/sbom-tool" \
+            --supplier "$SUPPLIER" --output "$RUNNER_TEMP/sbom-logs"
+
       - name: Verify the Portable PDBs and derive symbol probes
         run: >-
           dotnet run --project .workflows/tools/NuGetSymbols/NuGetSymbols.csproj --configuration Release --
@@ -94,14 +129,6 @@ jobs:
             ${{ runner.temp }}/packages/*.nupkg
             ${{ runner.temp }}/packages/*.snupkg
             ${{ runner.temp }}/candidate/candidate.json
-
-      - name: Require one SBOM per package
-        env:
-          PACKAGES: ${{ steps.candidate.outputs.packages }}
-        run: |
-          for id in $(echo "$PACKAGES" | python3 -I -c 'import json,sys; print("\n".join(json.load(sys.stdin)))'); do
-            test -s "$RUNNER_TEMP/packages/$id.spdx.json" || { echo "::error::Missing SBOM $id.spdx.json"; exit 1; }
-          done
 
       # WHY: GitHub's procedure for immutable releases: "Create the release as a draft. Attach all associated
       # assets to the draft release. Publish the draft release." The tag does not exist yet; publication requires

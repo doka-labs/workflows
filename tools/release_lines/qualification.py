@@ -117,17 +117,7 @@ def test_projects(root: Path) -> dict[str, str]:
     # NestedSet's shared Specification.Tests library evaluates to false.
     result = {}
     for project in source_projects(root):
-        completed = subprocess.run(["dotnet", "msbuild", str(project), "-nologo", "-getProperty:IsTestProject",
-                                    "-getProperty:AssemblyName"], capture_output=True, text=True, timeout=300,
-                                   check=False)
-        try:
-            properties = json.loads(completed.stdout)["Properties"]
-        except (ValueError, KeyError, TypeError) as error:
-            raise QualificationError(f"MSBuild cannot evaluate {project.relative_to(root)}.") from error
-
-        if completed.returncode:
-            raise QualificationError(f"MSBuild cannot evaluate {project.relative_to(root)}.")
-
+        properties = evaluate(root, project, ["IsTestProject", "AssemblyName"])
         if properties.get("IsTestProject", "").lower() == "true":
             name = properties.get("AssemblyName") or project.stem
             if name in result:
@@ -136,6 +126,48 @@ def test_projects(root: Path) -> dict[str, str]:
             result[name] = project.relative_to(root).as_posix()
 
     return result
+
+
+def evaluate(root: Path, project: Path, names: list[str]) -> dict[str, str]:
+    """Return MSBuild-evaluated properties of a restored project."""
+    command = ["dotnet", "msbuild", str(project), "-nologo", *(f"-getProperty:{name}" for name in names)]
+    completed = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+    try:
+        properties = json.loads(completed.stdout)["Properties"]
+    except (ValueError, KeyError, TypeError) as error:
+        raise QualificationError(f"MSBuild cannot evaluate {project.relative_to(root)}.") from error
+
+    if completed.returncode:
+        raise QualificationError(f"MSBuild cannot evaluate {project.relative_to(root)}.")
+
+    return properties
+
+
+def require_package_validation(root: Path, package_ids: list[str]) -> list[dict]:
+    """Require one packable project per release package, each with package validation enabled."""
+    # WHY: "EnablePackageValidation runs a series of checks after the Pack task"; MySql, SafeMigrations and
+    # NestedSet enable it for every shipped project. A baseline version stays the repository's choice (only NestedSet
+    # sets one). https://learn.microsoft.com/dotnet/fundamentals/apicompat/package-validation/overview
+    found = {}
+    for project in source_projects(root):
+        properties = evaluate(root, project, ["PackageId", "IsPackable", "EnablePackageValidation"])
+        if properties.get("IsPackable", "").lower() != "true" or properties.get("PackageId") not in package_ids:
+            continue
+
+        if properties["PackageId"] in found:
+            raise QualificationError(f"Two projects pack {properties['PackageId']}.")
+
+        if properties.get("EnablePackageValidation", "").lower() != "true":
+            raise QualificationError(f"{project.relative_to(root)} packs {properties['PackageId']} without "
+                                     "EnablePackageValidation.")
+
+        found[properties["PackageId"]] = project.relative_to(root).as_posix()
+
+    missing = sorted(set(package_ids) - set(found))
+    if missing:
+        raise QualificationError(f"No packable project produces {', '.join(missing)}.")
+
+    return [{"package": name, "project": path} for name, path in sorted(found.items())]
 
 
 def read_trx(path: Path) -> list[dict]:
@@ -269,8 +301,9 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
 
     skips = {item["project"] for item in policy["qualification"]["testResults"]["skips"]}
     tests = check_tests(sorted(trx_dir.rglob("*.trx")), test_projects(root), skips)
+    validated = require_package_validation(root, policy["release"]["packages"])
     attestation.write_predicate(output / "snapshot.json", snapshot)
     attestation.write_predicate(output / "qualification.json", {
         "schemaVersion": 1, "repository": repository, "sourceRef": source_ref, "commit": commit, "tree": tree,
-        "version": version, "snapshot": snapshot, "gates": gates, "tests": tests})
+        "version": version, "snapshot": snapshot, "gates": gates, "tests": tests, "packageValidation": validated})
     return {"tree": tree, "subject": str(subject), "gates": len(gates), "testProjects": len(tests)}

@@ -228,7 +228,7 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
         try:
             run = api.request(f"repos/{repository}/actions/runs/{run_id}")
         except GitHubError as error:
-            # WHY: A freshly dispatched run can return 404 for a short time after dispatch.
+            # WHY: A freshly dispatched run can return 404 for a short time after dispatch (NestedSet PR #32).
             if initialized or error.code != "github_http_error" or error.http_status != 404:
                 raise
 

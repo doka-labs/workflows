@@ -3,6 +3,12 @@ name: Dependency Review
 # Reviews the dependency delta of a pull request before it can merge, with
 # actions/dependency-review-action against the dependency graph GitHub holds
 # for the base and head commits.
+#
+# WHY: The graph comes from GitHub's automatic dependency submission, as in MySql and NestedSet. This workflow runs
+# no restore, so the risk SafeMigrations guards against with its separate workflow_run receiver (contributor
+# restore hooks with a write token) does not arise here. The documentation lists .NET 8 to 10 for automatic
+# submission; MySql's submission on .NET SDK 11.0.100 succeeds in practice (run 44951922938).
+# https://docs.github.com/en/code-security/reference/supply-chain-security/automatic-dependency-submission
 
 on:
   workflow_call:
@@ -67,8 +73,9 @@ jobs:
     # runs, including the action's wait for snapshots (180 seconds); 10 minutes is their common limit.
     timeout-minutes: 10
 
-    # WHY: The action reads the dependency graph through the API; it reads local files only for a config-file,
-    # which this workflow does not use, so the calling repository is not checked out.
+    # WHY: The action reads the dependency graph through the API; it reads local files only for a config-file
+    # (fs.readFileSync in src/config.ts of v5.0.1), which this workflow does not use, so the calling repository is
+    # not checked out. https://github.com/actions/dependency-review-action/blob/v5.0.1/src/config.ts
     steps:
       # WHY: The tool must come from the same commit as this workflow, not from a branch head.
       - name: Check out the review tool
@@ -81,7 +88,6 @@ jobs:
           persist-credentials: false
 
       - name: Review dependency changes
-        id: review
         uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
         with:
           base-ref: ${{ github.event.pull_request.base.sha }}
@@ -105,18 +111,10 @@ jobs:
       - name: Require exact license-exception versions
         if: ${{ inputs.license-exceptions != '' }}
         env:
-          DEPENDENCY_CHANGES_FILE: ${{ runner.temp }}/dependency-review-output.json
+          GH_TOKEN: ${{ github.token }}
           LICENSE_EXCEPTIONS: ${{ inputs.license-exceptions }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # WHY: Passed through an environment variable, a large comparison failed to start bash with "Argument list
-          # too long" (NestedSet run 44899846960). A quoted heredoc of one JSON string carries any size, and
-          # dependency metadata can neither run shell code nor end the data early.
-          cat > "$DEPENDENCY_CHANGES_FILE" <<'DEPENDENCY_REVIEW_OUTPUT'
-          ${{ toJSON(steps.review.outputs.dependency-changes) }}
-          DEPENDENCY_REVIEW_OUTPUT
-
-          python3 -I .workflows/tools/dependency_review/license_exceptions.py \
-            --changes "$DEPENDENCY_CHANGES_FILE" --exceptions "$LICENSE_EXCEPTIONS"
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 -I .workflows/tools/dependency_review/license_exceptions.py --repository "$GITHUB_REPOSITORY"
+          --base "$BASE_SHA" --head "$HEAD_SHA" --exceptions "$LICENSE_EXCEPTIONS"

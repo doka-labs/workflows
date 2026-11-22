@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote
@@ -86,6 +87,31 @@ def check_changes(changes: object, approved: dict[str, str]) -> None:
                 "Review license files before approving another version.")
 
 
+def fetch_changes(repository: str, base: str, head: str, *, run=subprocess.run) -> list:
+    """Read the complete dependency comparison of two commits from the dependency graph API, all pages."""
+    # WHY: The comparison is read directly instead of passing the action's output through the shell: a large output
+    # failed bash with "Argument list too long" (NestedSet run 44899846960), and expanding it into a run block is a
+    # template injection zizmor reports. The API returns the same fields the action uses.
+    # https://docs.github.com/en/rest/dependency-graph/dependency-review
+    if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
+        raise LicenseExceptionError("Base and head must be full commit SHAs.")
+
+    completed = run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/dependency-graph/compare/{base}...{head}"],
+                    capture_output=True, text=True, timeout=300, check=False)
+    if completed.returncode:
+        raise LicenseExceptionError("The dependency graph comparison could not be read.")
+
+    try:
+        pages = json.loads(completed.stdout)
+    except ValueError as error:
+        raise LicenseExceptionError("The dependency graph comparison is not valid JSON.") from error
+
+    if not isinstance(pages, list) or not all(isinstance(page, list) for page in pages):
+        raise LicenseExceptionError("Expected the complete dependency comparison array.")
+
+    return [change for page in pages for change in page]
+
+
 def read_changes(path: Path) -> object:
     """Read the action output, which the workflow stores as one JSON-encoded string."""
     try:
@@ -100,11 +126,16 @@ def read_changes(path: Path) -> object:
 def main(argv: list[str] | None = None) -> int:
     """Run the check from the command line."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--changes", type=Path, required=True)
+    parser.add_argument("--changes", type=Path)
+    parser.add_argument("--repository")
+    parser.add_argument("--base")
+    parser.add_argument("--head")
     parser.add_argument("--exceptions", required=True)
     args = parser.parse_args(argv)
     try:
-        check_changes(read_changes(args.changes), parse_exceptions(args.exceptions))
+        changes = (read_changes(args.changes) if args.changes is not None
+                   else fetch_changes(args.repository or "", args.base or "", args.head or ""))
+        check_changes(changes, parse_exceptions(args.exceptions))
     except LicenseExceptionError as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1

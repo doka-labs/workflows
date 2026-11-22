@@ -24,7 +24,8 @@ GENERATED_NOTICE = ("# Generated from .github/dependabot-template.yml and .githu
                     "# doka-labs/workflows; edit those files instead.\n")
 ENTRY = re.compile(r"^  - package-ecosystem: ([a-z-]+)\n", re.MULTILINE)
 KEY = re.compile(r"^    ([a-z-]+):", re.MULTILINE)
-# WHY: The SDK major selects the framework major; a line keeps its SDK major (all three repositories).
+# WHY: A line keeps its SDK major: the toolchain check requires the SDK major of the line's framework, and an SDK
+# major update would fail it (the same SDK rule in the Dependabot files of all three repositories).
 SDK_RULE = ('      - dependency-name: "*"\n'
             "        update-types:\n"
             "          - version-update:semver-major\n")

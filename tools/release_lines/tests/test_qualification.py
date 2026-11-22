@@ -151,6 +151,51 @@ class TestResultTests(unittest.TestCase):
         self.assertIn("No TRX", message)
 
 
+class PackageValidationTests(unittest.TestCase):
+    def check(self, evaluated, ids):
+        projects = [Path(f"/repo/src/{name}/{name}.csproj") for name in evaluated]
+        original = (qualification.source_projects, qualification.evaluate)
+        qualification.source_projects = lambda root: projects
+        qualification.evaluate = lambda root, project, names: evaluated[project.stem]
+        try:
+            return qualification.require_package_validation(Path("/repo"), ids)
+        finally:
+            qualification.source_projects, qualification.evaluate = original
+
+    def test_validated_packages_pass(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"},
+                     "Tests": {"PackageId": "Tests", "IsPackable": "false", "EnablePackageValidation": ""}}
+
+        # Act
+        result = self.check(evaluated, ["Doka.Core"])
+
+        # Assert
+        self.assertEqual([{"package": "Doka.Core", "project": "src/Core/Core.csproj"}], result)
+
+    def test_package_without_validation_fails(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "false"}}
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.check(evaluated, ["Doka.Core"])
+
+        # Assert
+        self.assertIn("without EnablePackageValidation", str(raised.exception))
+
+    def test_missing_package_fails(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"}}
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.check(evaluated, ["Doka.Core", "Doka.Other"])
+
+        # Assert
+        self.assertIn("Doka.Other", str(raised.exception))
+
+
 class GateJobTests(unittest.TestCase):
     def test_gate_with_successful_matrix_rows_passes(self):
         # Arrange

@@ -155,6 +155,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 -E -s -m tools.release_publication readback --candidate "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/readback"
 
+      # WHY: A consumer that restores each package from nuget.org only must receive the candidate's payload before
+      # the release is published (Baustein 9; Bestand N8, MySql's isolated consumer).
+      - name: Restore every package from nuget.org in an isolated consumer
+        if: steps.readback.outputs.complete == 'true'
+        working-directory: .workflows
+        run: >-
+          python3 -E -s -m tools.release_publication public-consumers --root "$GITHUB_WORKSPACE/repository"
+          --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/public-consumers"
+
       - name: Publish the immutable GitHub release
         if: steps.readback.outputs.complete == 'true'
         working-directory: .workflows

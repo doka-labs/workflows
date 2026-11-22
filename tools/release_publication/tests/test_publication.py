@@ -798,5 +798,64 @@ class TagAndAdmissionTests(unittest.TestCase):
         self.assertIn("another tag object or candidate", str(raised.exception))
 
 
+class PreTagHelperTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        (self.root / ".github").mkdir()
+        (self.root / publication.ALLOWED_SIGNERS).write_text("dev@example ssh-ed25519 AAAAKEY\n", encoding="utf-8")
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_registered_public_key_file_passes(self):
+        # Arrange
+        (self.root / "id.pub").write_text("ssh-ed25519 AAAAKEY dev@example\n", encoding="utf-8")
+
+        # Act
+        registered = publication.signing_key_registered(self.root, str(self.root / "id.pub"))
+
+        # Assert
+        self.assertTrue(registered)
+
+    def test_private_key_path_uses_its_public_key(self):
+        # Arrange
+        (self.root / "id").write_text("private", encoding="utf-8")
+        (self.root / "id.pub").write_text("ssh-ed25519 AAAAKEY dev@example\n", encoding="utf-8")
+
+        # Act
+        registered = publication.signing_key_registered(self.root, str(self.root / "id"))
+
+        # Assert
+        self.assertTrue(registered)
+
+    def test_unregistered_key_fails(self):
+        # Arrange
+        key = "key::ssh-ed25519 OTHERKEY"
+
+        # Act
+        registered = publication.signing_key_registered(self.root, key)
+
+        # Assert
+        self.assertFalse(registered)
+
+    def test_origin_url_forms_name_the_repository(self):
+        # Arrange
+        urls = ["git@github.com:doka-labs/Example.git", "https://github.com/doka-labs/Example"]
+        original = publication.run
+        results = []
+
+        # Act
+        try:
+            for url in urls:
+                publication.run = lambda command, url=url, **kwargs: url + "\n"
+                results.append(publication.repository_of(Path(".")))
+        finally:
+            publication.run = original
+
+        # Assert
+        self.assertEqual(["doka-labs/Example", "doka-labs/Example"], results)
+
+
 if __name__ == "__main__":
     unittest.main()

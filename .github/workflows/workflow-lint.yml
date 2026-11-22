@@ -1,0 +1,85 @@
+name: Workflow Lint
+
+# Lints the workflow and shell surface no compiler covers, as MySql's
+# eng/quality/lint-workflows.sh does: actionlint checks workflow syntax,
+# expressions and the shell in run blocks, zizmor audits the workflows for
+# Actions-specific security patterns, and shellcheck checks the shell scripts.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the lint job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: three static checks over a few files, each in seconds.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: The pins come from the same commit as this workflow, not from a branch head.
+      - name: Check out the lint pins
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      # WHY: The checksum comes from the release's published checksums file; a changed archive fails here.
+      # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+      - name: Install actionlint 1.7.12
+        env:
+          ARCHIVE: actionlint_1.7.12_linux_amd64.tar.gz
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$ARCHIVE" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$ARCHIVE"
+          echo "$SHA256  $RUNNER_TEMP/$ARCHIVE" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/actionlint"
+          tar --extract --gzip --file "$RUNNER_TEMP/$ARCHIVE" --directory "$RUNNER_TEMP/actionlint" actionlint
+
+      # WHY: pip --require-hashes installs only the wheel whose digest the pin file lists (MySql's procedure).
+      # https://pip.pypa.io/en/stable/topics/secure-installs/#hash-checking-mode
+      - name: Install zizmor from its hash-pinned requirement
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zizmor"
+          "$RUNNER_TEMP/zizmor/bin/pip" install --quiet --disable-pip-version-check --require-hashes \
+            --only-binary=:all: --requirement .workflows/tools/workflow_lint/zizmor-requirements.txt
+
+      - name: Check the workflows with actionlint
+        working-directory: repository
+        run: '"$RUNNER_TEMP/actionlint/actionlint" -color'
+
+      # WHY: --offline keeps the check deterministic and needs no token; the audits that need the network are
+      # covered by rulesets (MySql's reason). https://docs.zizmor.sh/usage/
+      - name: Audit the workflows with zizmor
+        working-directory: repository
+        run: '"$RUNNER_TEMP/zizmor/bin/zizmor" --offline --persona=regular .github/workflows'
+
+      # WHY: shellcheck ships with the hosted runner image (0.11.0 on Ubuntu 26.04), so it is not installed again.
+      # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md
+      - name: Check the shell scripts with shellcheck
+        working-directory: repository
+        run: |
+          mapfile -t scripts < <(git ls-files '*.sh')
+          if (( ${#scripts[@]} > 0 )); then
+            shellcheck --severity=warning --external-sources "${scripts[@]}"
+          fi

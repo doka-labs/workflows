@@ -17,31 +17,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  actionlint:
-    name: Actionlint
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      # WHY: The checksum comes from the release's published checksums file; a changed archive fails here.
-      - name: Install actionlint 1.7.12
-        env:
-          ARCHIVE: actionlint_1.7.12_linux_amd64.tar.gz
-          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
-        run: |
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/$ARCHIVE" \
-            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/$ARCHIVE"
-          echo "$SHA256  $RUNNER_TEMP/$ARCHIVE" | sha256sum --check --strict
-          mkdir "$RUNNER_TEMP/actionlint"
-          tar --extract --gzip --file "$RUNNER_TEMP/$ARCHIVE" --directory "$RUNNER_TEMP/actionlint" actionlint
-
-      - name: Check the workflows
-        run: '"$RUNNER_TEMP/actionlint/actionlint" -color'
+  # WHY: The helper repository lints itself with the same workflow it offers to the product repositories. "$/" is
+  # GitHub's self-repository reference: it resolves to this repository at the running commit, independent of the
+  # workspace. https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+  lint:
+    name: Lint
+    uses: $/.github/workflows/workflow-lint.yml
 
   tests:
     name: Tool Tests

@@ -4,11 +4,15 @@
 #   config does not select or create a self-hosted runner),
 # - the job.workflow_repository and job.workflow_sha context properties
 #   (upstream closed the request as not planned),
-# - the concurrency "queue" key.
+# - the concurrency "queue" key,
+# - the self-repository reference "uses: $/...", which GitHub recommends ("Using an action in the same repository
+#   as the workflow at the running commit (recommended)") and which MySql uses for its reusable workflow in a green
+#   run (44946546212).
 # Remove an entry when the pinned actionlint recognizes the feature itself.
 # https://github.com/actions/runner-images/issues/14747
 # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
 # https://github.com/rhysd/actionlint/issues/757
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
 self-hosted-runner:
   labels:
     - ubuntu-26.04
@@ -17,3 +21,4 @@ paths:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
       - 'unexpected key "queue" for "concurrency" section'
+      - 'reusable workflow call "\$/\.github/workflows/[^"]+" at "uses" is not following the format'

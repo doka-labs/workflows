@@ -7,7 +7,10 @@ their own inputs.
 ## Calling a workflow
 
 Pin the call to a full commit SHA and keep the version as a comment so
-Dependabot can update it:
+Dependabot can update it. Dependabot updates both the SHA and the comment of a
+pinned call (for example `upload-sarif@9b325408... # v4.39.1` to
+`@33d7b85d... # v4.39.3` in NestedSet pull request #34); it proposes versions
+from this repository's tags, listed in `CHANGELOG.md`:
 
 ```yaml
 jobs:
@@ -75,6 +78,22 @@ jobs:
 ```
 
 The tool lives in `tools/dependency_audit/`.
+
+### `workflow-lint.yml`
+
+Lints the calling repository's workflows and shell scripts: actionlint 1.7.12
+(checksum-verified), zizmor 1.32.0 (installed with `pip --require-hashes` from
+`tools/workflow_lint/zizmor-requirements.txt`, run `--offline`), and shellcheck
+from the runner image for every tracked `*.sh`. actionlint reads the caller's
+own `.github/actionlint.yaml`; a caller that uses `ubuntu-26.04`, the
+`job.workflow_*` context, `concurrency.queue` or `uses: $/...` needs the same
+entries as this repository's `.github/actionlint.yaml`.
+
+```yaml
+jobs:
+  workflow-lint:
+    uses: doka-labs/workflows/.github/workflows/workflow-lint.yml@<commit-sha> # v0.4.0
+```
 
 ### `dependency-review.yml`
 
@@ -237,6 +256,23 @@ jobs:
     uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.2.0
 ```
 
+### `coverage-gate.yml`
+
+Merges the Cobertura reports of the run (line by line across test projects)
+and enforces `.github/coverage-policy.json`: minimum line and branch percent
+per assembly and per critical class, a branch floor of `null` for a
+branch-free surface, optional maximum report age, no empty report, and a
+threshold with executed lines for every package in `release.packages`.
+
+```json
+{
+  "schemaVersion": 1,
+  "evidenceMaxAgeSeconds": null,
+  "assemblies": [{"name": "Doka.Example", "minimumLinePercent": 90, "minimumBranchPercent": 80}],
+  "criticalClasses": []
+}
+```
+
 ## Releases
 
 One `release-candidate.yml` per product repository, started by
@@ -253,16 +289,25 @@ them:
    one artifact with every `.nupkg`, its `.snupkg` and a `<PackageId>.spdx.json`.
 3. `release-qualification.yml` (see above).
 4. `release-candidate.yml`: checks package identity and source binding,
+   restores each package in an isolated consumer from the candidate bytes and
+   requires the restored archives to be byte-identical, generates one SPDX 2.2
+   SBOM per package from that consumer with `sbom-tool` 4.1.5 and validates it,
    verifies each Portable PDB against its assembly (`tools/NuGetSymbols`),
    attests build provenance and the SBOMs, and stores the candidate as a draft
    release. The job summary shows the command to tag the commit.
-5. The maintainer pushes the SSH-signed annotated tag `v<version>`; signers
-   are listed in `.github/allowed_signers`.
+5. The maintainer checks locally with
+   `python3 -E -s -m tools.release_publication pre-tag --version <version>`
+   (run from a checkout of this repository, in the product checkout or with
+   `--root`): clean checkout on the current head of the protected line, tag and
+   version unused, the draft's candidate built from this commit, SSH signing
+   configured with a key listed in `.github/allowed_signers`. Then the
+   maintainer creates and pushes the SSH-signed annotated tag `v<version>`.
 6. `release-publish.yml` in the publisher environment: after approval it
    rechecks the assets against their attestations, the policy on `main`, the
    environment grants and the signed tag, attests the admission, pushes what
    nuget.org does not hold yet, reads every package back signed and every
-   Portable PDB from the symbol server, then publishes the immutable release.
+   Portable PDB from the symbol server, restores every package from nuget.org
+   only in an isolated consumer, then publishes the immutable release.
    If the readback is still pending after one hour, the job ends without
    failure and re-running it continues.
 

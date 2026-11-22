@@ -549,3 +549,74 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
         require(latest.get("tag_name") == manifest["tag"], f"GitHub did not make {manifest['tag']} Latest.")
 
     return release
+
+
+def repository_of(root: Path) -> str:
+    """Return owner/name of the checkout's origin on GitHub."""
+    url = run(["git", "-C", str(root), "remote", "get-url", "origin"]).strip()
+    match = re.fullmatch(r"(?:https://github\.com/|git@github\.com:)([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?", url)
+    require(match is not None, "origin is not a GitHub repository.")
+    return match[1]
+
+
+def signing_key_registered(root: Path, signing_key: str) -> bool:
+    """Return whether the configured SSH signing key's public key is listed in .github/allowed_signers."""
+    if signing_key.startswith("key::"):
+        public = signing_key.removeprefix("key::")
+    elif signing_key.startswith("ssh-"):
+        public = signing_key
+    else:
+        path = Path(signing_key).expanduser()
+        public_path = path if path.suffix == ".pub" else path.with_name(path.name + ".pub")
+        require(public_path.is_file(), f"The public key of the signing key ({public_path}) does not exist.")
+        public = public_path.read_text(encoding="utf-8")
+
+    key_type, _, key_data = public.strip().partition(" ")
+    key = f"{key_type} {key_data.split()[0]}" if key_data else ""
+    signers = (root / ALLOWED_SIGNERS).read_text(encoding="utf-8").splitlines()
+    return bool(key) and any(key in line for line in signers if line.strip() and not line.lstrip().startswith("#"))
+
+
+def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
+    """Check locally, without any write, that the checkout can be tagged for the version (B01 4, NestedSet)."""
+    repository = repository_of(root)
+    release_notes(root, version)
+    require(not run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]).strip(),
+            "The checkout is not clean.")
+    branch = run(["git", "-C", str(root), "branch", "--show-current"]).strip()
+    source_ref = f"refs/heads/{branch}"
+    policy = observe_authority(api, repository)["policy"]
+    policies.select_line(policy, source_ref, version, purpose="publication")
+    commit = run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+    require(protected_head(api, repository, source_ref) == commit,
+            f"The checkout is not the current head of the protected {branch}.")
+    tag = f"v{version}"
+    require(not tag_exists(api, repository, tag), f"{tag} already exists.")
+    others = tags_on_commit(root, commit)
+    require(not others, f"{commit} already carries the tags {', '.join(others)}.")
+    taken = sorted(name for name, state in nuget.unused(policy["release"]["packages"], version, fetcher=fetcher).items()
+                   if state != "absent")
+    require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
+    release = release_for(api, repository, tag)
+    require(release is not None and release.get("draft") is True, f"No draft release holds a candidate for {tag}.")
+    # WHY: The tag must point at the commit the draft's candidate was built from (V6, NestedSet).
+    asset = release_assets(api, repository, release).get(CANDIDATE)
+    require(asset is not None, f"The draft of {tag} has no {CANDIDATE}.")
+    data = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
+                           f"repos/{repository}/releases/assets/{asset['id']}"], capture_output=True, timeout=120,
+                          check=False)
+    require(data.returncode == 0, f"Cannot read {CANDIDATE} of the draft.")
+    with tempfile.TemporaryDirectory(prefix="pre-tag-") as directory:
+        (Path(directory) / CANDIDATE).write_bytes(data.stdout)
+        manifest = read_json(Path(directory) / CANDIDATE)
+
+    require(manifest.get("commit") == commit and manifest.get("version") == version,
+            f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")
+    # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers (B01 4, 5).
+    require(run(["git", "-C", str(root), "config", "--get", "gpg.format"]).strip() == "ssh",
+            "Configure SSH signing (git config gpg.format ssh) before tagging.")
+    signing_key = subprocess.run(["git", "-C", str(root), "config", "--get", "user.signingkey"], capture_output=True,
+                                 text=True, timeout=30, check=False).stdout.strip()
+    require(bool(signing_key), "Configure the signing key (git config user.signingkey) before tagging.")
+    require(signing_key_registered(root, signing_key), f"The signing key is not listed in {ALLOWED_SIGNERS}.")
+    return {"tag": tag, "commit": commit, "command": f'git tag -s {tag} {commit} -m "{tag}"'}

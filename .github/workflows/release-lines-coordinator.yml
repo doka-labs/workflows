@@ -35,7 +35,8 @@ jobs:
       contents: read
       actions: write
     runs-on: ${{ inputs.runs-on }}
-    # WHY: GitHub-hosted jobs end after 6 hours; workload budgets are capped at 330 minutes.
+    # WHY: "Each job in a workflow can run for up to 6 hours of execution time" on GitHub-hosted runners; workload
+    # budgets are capped at 330 minutes. https://docs.github.com/en/actions/reference/limits
     timeout-minutes: 360
     # WHY: Runs of one workload wait in order (up to 100) instead of cancelling each other; queue: max cannot be
     # combined with cancel-in-progress: true.

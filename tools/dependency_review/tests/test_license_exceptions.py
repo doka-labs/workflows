@@ -153,6 +153,45 @@ class ActionNameTests(unittest.TestCase):
         self.assertIsNone(identity)
 
 
+class FetchChangesTests(unittest.TestCase):
+    def test_all_pages_are_joined(self):
+        # Arrange
+        pages = [[added("A", "1.0.0")], [added("B", "2.0.0")]]
+
+        def run(command, **kwargs):
+            self.assertEqual(["gh", "api", "--paginate", "--slurp"], command[:4])
+            return type("Completed", (), {"returncode": 0, "stdout": json.dumps(pages)})()
+
+        # Act
+        changes = check.fetch_changes("doka-labs/Example", "a" * 40, "b" * 40, run=run)
+
+        # Assert
+        self.assertEqual(["A", "B"], [change["name"] for change in changes])
+
+    def test_failed_read_fails(self):
+        # Arrange
+        def run(command, **kwargs):
+            return type("Completed", (), {"returncode": 1, "stdout": ""})()
+
+        # Act
+        with self.assertRaises(check.LicenseExceptionError) as raised:
+            check.fetch_changes("doka-labs/Example", "a" * 40, "b" * 40, run=run)
+
+        # Assert
+        self.assertIn("could not be read", str(raised.exception))
+
+    def test_short_sha_fails(self):
+        # Arrange
+        base = "abc"
+
+        # Act
+        with self.assertRaises(check.LicenseExceptionError) as raised:
+            check.fetch_changes("doka-labs/Example", base, "b" * 40)
+
+        # Assert
+        self.assertIn("full commit SHAs", str(raised.exception))
+
+
 class MainTests(unittest.TestCase):
     def test_json_string_transport_is_decoded(self):
         # Arrange
