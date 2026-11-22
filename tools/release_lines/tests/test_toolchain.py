@@ -25,7 +25,8 @@ def entry(version, kind="Direct"):
 
 
 class Repository:
-    def __init__(self, directory, *, sdk="11.0.100", prerelease=False, frameworks="<TargetFramework>net11.0</TargetFramework>",
+    def __init__(self, directory, *, sdk="11.0.100", prerelease=False,
+                 frameworks="<TargetFramework>net11.0</TargetFramework>",
                  packages='<PackageVersion Include="Microsoft.EntityFrameworkCore" Version="11.0.2" />',
                  prefix="11.1.0", locks=None, runner=None):
         self.root = Path(directory)

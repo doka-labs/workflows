@@ -528,7 +528,8 @@ class VerifyCandidateTests(unittest.TestCase):
     def test_duplicate_manifest_key_fails(self):
         # Arrange
         text = (self.root / publication.CANDIDATE).read_text(encoding="ascii")
-        (self.root / publication.CANDIDATE).write_text(text.replace('{"schemaVersion": 1,', '{"schemaVersion": 1, "schemaVersion": 1,', 1), encoding="ascii")
+        repeated = text.replace('{"schemaVersion": 1,', '{"schemaVersion": 1, "schemaVersion": 1,', 1)
+        (self.root / publication.CANDIDATE).write_text(repeated, encoding="ascii")
 
         # Act
         with self.assertRaises(publication.PublicationError) as raised:
@@ -542,7 +543,8 @@ class EnvironmentTests(unittest.TestCase):
     def check(self, grants, *, reviewers=True):
         policy = json.loads((Path(__file__).resolve().parents[3] / "examples" / "release-policy.json").read_text())
         base = f"repos/{policy['repository']}/environments/nuget"
-        routes = {base: {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"id": 1}] if reviewers else []}],
+        rule = {"type": "required_reviewers", "reviewers": [{"id": 1}] if reviewers else []}
+        routes = {base: {"protection_rules": [rule],
                          "deployment_branch_policy": {"custom_branch_policies": True, "protected_branches": False}},
                   f"{base}/deployment-branch-policies": {"total_count": len(grants), "branch_policies": grants}}
         for branch in ("main", "maintenance%2F10.x"):
@@ -1212,6 +1214,170 @@ class PreTagImmutableTests(unittest.TestCase):
 
         # Assert
         self.assertIn("Immutable releases are not enabled", str(raised.exception))
+
+
+class StageWithoutDigestTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.manifest = candidate_directory(self.root)
+        self.release = {"id": 7, "tag_name": "v1.2.3", "name": "v1.2.3", "draft": True, "prerelease": False,
+                        "body": (self.root / publication.NOTES).read_text(encoding="utf-8")}
+        sbom = self.root / "Doka.Core.spdx.json"
+        self.old = bytes(reversed(sbom.read_bytes()))
+        self.assets = [{"id": 1, "name": sbom.name, "state": "uploaded", "size": sbom.stat().st_size,
+                        "digest": None}]
+        originals = (publication.run, publication.asset_bytes)
+        publication.run = lambda command, **kwargs: ""
+        publication.asset_bytes = lambda repository, asset: self.old
+        self.addCleanup(lambda: (setattr(publication, "run", originals[0]),
+                                 setattr(publication, "asset_bytes", originals[1])))
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_same_size_other_bytes_of_an_unfinished_attempt_are_replaced(self):
+        # Arrange
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+
+        # Act
+        result = publication.stage(api, REPOSITORY, self.root)
+
+        # Assert
+        self.assertIn(("DELETE", f"repos/{REPOSITORY}/releases/assets/1"), api.calls)
+        self.assertIn("Doka.Core.spdx.json", result["uploaded"])
+
+    def test_same_size_other_bytes_of_a_complete_candidate_fail(self):
+        # Arrange
+        candidate = self.root / publication.CANDIDATE
+        self.assets.append({"id": 2, "name": candidate.name, "state": "uploaded", "size": candidate.stat().st_size,
+                            "digest": f"sha256:{packages.sha256(candidate)}"})
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.stage(api, REPOSITORY, self.root)
+
+        # Assert
+        self.assertIn("Doka.Core.spdx.json of the draft differs", str(raised.exception))
+
+
+class PublishedInventoryTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.manifest = candidate_directory(self.root)
+        names = {*publication.expected_assets(self.manifest), publication.CANDIDATE}
+        self.assets = [{"id": index, "name": name, "state": "uploaded",
+                        "digest": f"sha256:{packages.sha256(self.root / name)}"} for index, name in enumerate(names)]
+        self.release = {"id": 7, "tag_name": "v1.2.3", "name": "v1.2.3", "draft": True, "prerelease": False,
+                        "body": (self.root / publication.NOTES).read_text(encoding="utf-8")}
+        self.order = []
+        originals = (publication.run, publication.latest_flag, publication.release_assets)
+        publication.run = lambda command, **kwargs: ""
+        publication.latest_flag = lambda api, repository, version: self.order.append("latest") or False
+        self.addCleanup(lambda: (setattr(publication, "run", originals[0]),
+                                 setattr(publication, "latest_flag", originals[1]),
+                                 setattr(publication, "release_assets", originals[2])))
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_extra_asset_after_publication_fails_without_retry(self):
+        # Arrange
+        releases = [self.release, {**self.release, "draft": False, "immutable": True}]
+        inventories = [self.assets, self.assets + [{"id": 50, "name": "extra.zip", "state": "uploaded",
+                                                    "digest": "sha256:" + "1" * 64}]]
+        original = publication.release_for
+        publication.release_for = lambda api, repository, tag: releases.pop(0) if len(releases) > 1 else releases[0]
+        self.addCleanup(setattr, publication, "release_for", original)
+        publication.release_assets = lambda api, repository, release: (
+            self.order.append("assets") or {asset["name"]: asset for asset in inventories.pop(0)})
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases/7": {}})
+
+        # Act
+        with self.assertRaises(publication.ReleaseInventoryError) as raised:
+            publication.publish_release(api, REPOSITORY, self.manifest, self.root, attempts=3, sleep=lambda s: None)
+
+        # Assert
+        self.assertIn("extra.zip", str(raised.exception))
+        self.assertEqual(["latest", "assets", "assets"], self.order)
+        self.assertIn(("PATCH", f"repos/{REPOSITORY}/releases/7"), api.calls)
+
+
+class ProbeConsistencyTests(unittest.TestCase):
+    def test_probes_of_one_url_with_other_bytes_fail(self):
+        # Arrange
+        root = Path(tempfile.mkdtemp())
+        sdk = root / "global.json"
+        sdk.write_text("{}", encoding="ascii")
+        probe = {"url": "https://symbols.nuget.org/x.pdb", "checksum": "SHA256:00", "pdb": "x.pdb", "sha256": "a" * 64}
+
+        # Act
+        with self.assertRaises(nuget.NuGetError) as raised:
+            nuget.readback(root, [], [probe, {**probe, "sha256": "b" * 64}], root / "work", sdk,
+                           fetcher=FakeFetcher({}), verifier=lambda path, timeout: None, clock=lambda: 0.0,
+                           sleep=lambda seconds: None, timeout=0)
+
+        # Assert
+        self.assertIn("expect different bytes at one URL", str(raised.exception))
+
+
+class PreTagDraftTests(unittest.TestCase):
+    def run_pre_tag(self, failure=None):
+        from unittest import mock
+
+        commands = {("status",): "", ("branch",): "main\n", ("rev-parse",): f"{COMMIT}\n", ("config",): "ssh\n"}
+        manifest = json.dumps({"commit": COMMIT, "version": "1.2.3"}).encode()
+        checked = []
+
+        def complete(api, repository, release, verify=None):
+            checked.append(release["id"])
+            if failure is not None:
+                raise failure
+
+        patches = {
+            "repository_of": lambda root: REPOSITORY, "release_notes": lambda root, version: "notes",
+            "run": lambda command, **kwargs: commands[(command[3],)],
+            "observe_authority": lambda api, repository: {"policy": {"release": {"packages": ["Doka.Core"]}}},
+            "protected_head": lambda api, repository, ref: COMMIT, "tag_exists": lambda api, repository, tag: False,
+            "tags_on_commit": lambda root, commit: [],
+            "release_for": lambda api, repository, tag: {"id": 7, "draft": True, "tag_name": tag},
+            "release_assets": lambda api, repository, release: {publication.CANDIDATE: {"id": 1, "size": 1}},
+            "asset_bytes": lambda repository, asset: manifest, "require_complete_draft": complete,
+            "signing_key_registered": lambda root, key: True}
+        api = FakeApi({f"repos/{REPOSITORY}/immutable-releases": {"enabled": True}})
+        with mock.patch.multiple(publication, **patches), \
+                mock.patch.object(publication.policies, "select_line", return_value={}), \
+                mock.patch.object(publication.subprocess, "run", return_value=mock.Mock(stdout="key::ssh-ed25519 K")), \
+                mock.patch.object(publication.nuget, "unused", return_value={"Doka.Core": "absent"}):
+            result = publication.pre_tag(api, Path("."), "1.2.3")
+
+        return result, checked
+
+    def test_complete_draft_gets_the_tag_command(self):
+        # Arrange
+        expected = f'git tag -s v1.2.3 {COMMIT} -m "v1.2.3"'
+
+        # Act
+        result, checked = self.run_pre_tag()
+
+        # Assert
+        self.assertEqual(expected, result["command"])
+        self.assertEqual([7], checked)
+
+    def test_draft_failing_verification_gets_no_tag_command(self):
+        # Arrange
+        failure = publication.PublicationError("The draft of v1.2.3 cannot be published (No SBOM attestation).")
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.run_pre_tag(failure)
+
+        # Assert
+        self.assertIn("No SBOM attestation", str(raised.exception))
 
 
 if __name__ == "__main__":

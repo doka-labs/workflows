@@ -256,8 +256,8 @@ def verify_public(directory: Path, inventory: list[dict], version: str, sdk: Pat
             identity = next(key for key in assets["libraries"] if key.rsplit("/", 1)[0].lower() == item["id"].lower())
             restored = list((work / "packages" / assets["libraries"][identity]["path"]).glob("*.nupkg"))
             # WHY: nuget.org adds its repository signature, so the public bytes differ only by .signature.p7s.
-            require(len(restored) == 1 and packages.canonical_payload(restored[0]) == packages.canonical_payload(archive),
-                    f"nuget.org serves another payload for {item['id']} {version}.")
+            same = len(restored) == 1 and packages.canonical_payload(restored[0]) == packages.canonical_payload(archive)
+            require(same, f"nuget.org serves another payload for {item['id']} {version}.")
             result.append({"package": item["id"], "restoredFrom": NUGET_SOURCE})
 
     return result

@@ -100,7 +100,8 @@ class RestoreTests(unittest.TestCase):
 
 def assets(libraries, dependencies=None, framework="net10.0", references=None):
     return {"targets": {framework: {}},
-            "project": {"frameworks": {framework: {"dependencies": dependencies or {"Doka.Core": {"version": "[1.2.3, 1.2.3]"}}}},
+            "project": {"frameworks": {framework: {
+                "dependencies": dependencies or {"Doka.Core": {"version": "[1.2.3, 1.2.3]"}}}},
                         "restore": {"frameworks": {framework: {"projectReferences": references or {}}}}},
             "libraries": {key: {"type": "package"} for key in libraries}}
 
@@ -152,7 +153,8 @@ class ManifestTests(unittest.TestCase):
     def manifest(self, components):
         packages_list = [{"SPDXID": "SPDXRef-RootPackage", "name": "Doka.Core", "versionInfo": "1.2.3"}]
         packages_list += [{"SPDXID": f"SPDXRef-{name}", "name": name, "versionInfo": version,
-                           "externalRefs": [{"referenceType": "purl", "referenceLocator": f"pkg:nuget/{name}@{version}"}]}
+                           "externalRefs": [{"referenceType": "purl",
+                                             "referenceLocator": f"pkg:nuget/{name}@{version}"}]}
                           for name, version in components]
         return {"spdxVersion": "SPDX-2.2", "documentDescribes": ["SPDXRef-RootPackage"], "packages": packages_list,
                 "files": [{"fileName": f"./{self.archive.name}",

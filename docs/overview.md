@@ -255,7 +255,7 @@ flowchart TB
   only -- yes --> done1(["end: qualified, never published"])
   only -- no --> cand["release-candidate / Candidate<br/>see 12"]
   cand --> sbom["release-candidate / SBOM<br/>one SBOM attestation per package"]
-  cand --> tag["maintainer: pre-tag check (also immutable<br/>releases enabled), SSH-signed annotated tag<br/>v&lt;version&gt;, push"]
+  cand --> tag["maintainer: pre-tag check (immutable releases<br/>enabled, draft passes the publish verification),<br/>SSH-signed annotated tag v&lt;version&gt;, push"]
   tag --> approve["environment approval"]
   sbom --> publish
   approve --> publish["release-publish<br/>see 13"]
@@ -306,7 +306,7 @@ flowchart TB
   c5 --> c6["packages bound to repository and commit,<br/>exactly release.packages, versions unused,<br/>write candidate.json"]
   c6 --> c7[("attest SLSA provenance<br/>packages and candidate.json")]
   c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>sboms.json: every SBOM with its digest<br/>and its package's digest")]
-  c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal; with candidate.json in the draft<br/>every asset must be equal, without it differing assets<br/>of an unfinished attempt are replaced; candidate.json last"]
+  c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal; one stage per version at a time;<br/>with candidate.json in the draft every asset must be<br/>equal (hashed when GitHub reports no digest), without it<br/>differing assets of an unfinished attempt are replaced;<br/>candidate.json last"]
   c8 --> s1["SBOM job per package: packages artifact and sboms.json,<br/>write the SBOM, both digests equal the candidate"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
 ```
 
@@ -328,9 +328,9 @@ flowchart TB
   readback -- "no: end without failure" --> rerun(["re-run the job later"])
   readback -- yes --> consumer["restore every package from nuget.org only;<br/>payload equals the candidate"]
   consumer --> recheck2["recheck"]
-  recheck2 --> cur["current draft assets equal the candidate"]
+  recheck2 --> cur["Latest decided, then the current draft<br/>assets equal the candidate"]
   cur --> rel["publish the draft by numeric ID,<br/>make_latest only for a strictly newer stable version"]
-  rel --> verify["release immutable, gh release verify,<br/>gh release verify-asset for every asset,<br/>Latest confirmed"]
+  rel --> verify["release immutable, gh release verify,<br/>gh release verify-asset for every asset,<br/>whole asset inventory equals the candidate,<br/>Latest confirmed"]
 ```
 
 ## 14. Data between jobs

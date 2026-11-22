@@ -9,8 +9,9 @@ NOW = 1_800_000_000
 
 
 def report(lines, assembly="Doka.Core", class_name="Doka.Core.Thing", source="/w/src/Core/Thing.cs", timestamp=NOW):
-    body = "".join(f'<line number="{number}" hits="{hits}"' + (f' condition-coverage="50% ({cov}/{tot})"' if tot else "")
-                   + " />" for number, hits, cov, tot in lines)
+    body = "".join(f'<line number="{number}" hits="{hits}"'
+                   + (f' condition-coverage="50% ({cov}/{tot})"' if tot else "") + " />"
+                   for number, hits, cov, tot in lines)
     return (f'<?xml version="1.0"?><coverage timestamp="{timestamp}"><packages><package name="{assembly}"><classes>'
             f'<class name="{class_name}" filename="{source}"><lines>{body}</lines></class></classes></package>'
             "</packages></coverage>")
@@ -174,6 +175,24 @@ class ConditionValueTests(unittest.TestCase):
 
         # Assert
         self.assertIn("invalid condition-coverage", str(raised.exception))
+
+
+class MethodOnlyReportTests(unittest.TestCase):
+    def test_report_with_method_lines_only_counts_as_empty(self):
+        # Arrange
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        Path(directory.name, "a.cobertura.xml").write_text(report([(1, 1, 0, 0)]), encoding="utf-8")
+        method_only = report([(1, 1, 0, 0)]).replace("<lines>", "<methods><method><lines>", 1).replace(
+            "</lines>", "</lines></method></methods><lines></lines>", 1)
+        Path(directory.name, "b.cobertura.xml").write_text(method_only, encoding="utf-8")
+
+        # Act
+        with self.assertRaises(coverage.CoverageError) as raised:
+            coverage.verify(Path(directory.name), policy(branch=None), ["Doka.Core"], now=NOW)
+
+        # Assert
+        self.assertIn("b.cobertura.xml is an empty or invalid Cobertura report", str(raised.exception))
 
 
 if __name__ == "__main__":

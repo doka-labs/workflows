@@ -393,5 +393,32 @@ class CoherentGroupTests(unittest.TestCase):
         self.assertEqual(value["toolchain"]["coherentGroups"], result["toolchain"]["coherentGroups"])
 
 
+class CandidateGateWorkflowTests(unittest.TestCase):
+    def test_candidate_gate_outside_the_release_workflow_fails(self):
+        # Arrange
+        value = example()
+        value["qualification"]["gates"].append({"name": "release / Build", "kind": "candidate-produced",
+                                                "workflow": ".github/workflows/ci.yml"})
+
+        # Act
+        with self.assertRaises(policy.PolicyError) as raised:
+            policy.validate_policy(value)
+
+        # Assert
+        self.assertIn("release workflowPath: release / Build", str(raised.exception))
+
+    def test_candidate_gate_of_the_release_workflow_passes(self):
+        # Arrange
+        value = example()
+        value["qualification"]["gates"].append({"name": "release / Build", "kind": "candidate-produced",
+                                                "workflow": value["release"]["workflowPath"]})
+
+        # Act
+        result = policy.validate_policy(value)
+
+        # Assert
+        self.assertEqual(2, len(result["qualification"]["gates"]))
+
+
 if __name__ == "__main__":
     unittest.main()

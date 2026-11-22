@@ -364,7 +364,8 @@ class GuardTests(unittest.TestCase):
     def maintenance_environment(self, **overrides):
         values = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": "refs/heads/maintenance/10.x",
                   "GITHUB_SHA": MAINTENANCE,
-                  "GITHUB_WORKFLOW_REF": f"{REPOSITORY}/.github/workflows/dependency-audit.yml@refs/heads/maintenance/10.x"}
+                  "GITHUB_WORKFLOW_REF":
+                      f"{REPOSITORY}/.github/workflows/dependency-audit.yml@refs/heads/maintenance/10.x"}
         values.update(overrides)
         return environment(**values)
 
@@ -482,6 +483,27 @@ class GitHubTimeoutTests(unittest.TestCase):
         # Assert
         self.assertEqual("github_timeout", raised.exception.code)
         self.assertNotIn("x=1", str(raised.exception))
+
+
+class ScaledPollTests(unittest.TestCase):
+    def test_late_visibility_succeeds_with_a_long_poll_interval(self):
+        # Arrange
+        routes = base_routes()
+        routes[("GET", f"repos/{REPOSITORY}/actions/runs/{RUN_ID}")] = [
+            GitHubError("missing", code="github_http_error", http_status=404), run()]
+        api = FakeApi(routes)
+        clock = FakeClock()
+        workload = {"workflow": ".github/workflows/dependency-audit.yml", "requiredJobs": ["dependency-audit / Audit"],
+                    "timeoutMinutes": 60}
+
+        # Act
+        result = coordinator.wait_for_run(api, REPOSITORY, RUN_ID, workload, "refs/heads/maintenance/10.x",
+                                          MAINTENANCE, "schedule-5-1", record=lambda update: None, clock=clock,
+                                          sleep=clock.sleep, poll_seconds=300)
+
+        # Assert
+        self.assertEqual("success", result["verificationStatus"])
+        self.assertLess(clock.now, 300)
 
 
 if __name__ == "__main__":

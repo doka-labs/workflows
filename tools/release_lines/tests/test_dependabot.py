@@ -82,7 +82,8 @@ class RenderTests(unittest.TestCase):
 
         # Assert
         sdk = rendered.split("  - package-ecosystem: dotnet-sdk\n")[1].split("  - package-ecosystem:")[0]
-        self.assertIn('      - dependency-name: "*"\n        update-types:\n          - version-update:semver-major\n', sdk)
+        expected = '      - dependency-name: "*"\n        update-types:\n          - version-update:semver-major\n'
+        self.assertIn(expected, sdk)
 
     def test_independent_toolchain_blocks_framework_majors(self):
         # Arrange

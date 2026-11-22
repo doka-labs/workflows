@@ -226,8 +226,11 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
                   "head_branch": source_ref.removeprefix("refs/heads/"), "path": workload["workflow"]}
     expected_title = f"maintenance {correlation}"
 
-    def pause(until: float) -> None:
-        sleep(min(poll_seconds, max(0.0, until - clock())))
+    # WHY: The visibility and result windows (300 and 120 seconds) are short and bounded; they poll every
+    # POLL_SECONDS, because a poll interval scaled for many lines could reach the end of a window before the next
+    # look. Only the long wait for the run uses the scaled interval.
+    def pause(until: float, interval: float = POLL_SECONDS) -> None:
+        sleep(min(interval, max(0.0, until - clock())))
 
     while True:
         try:
@@ -299,7 +302,7 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
             return {"sourceRef": source_ref, "sourceCommit": commit, "runId": run_id, "conclusion": "success",
                     "verificationStatus": "success"}
 
-        pause(deadline)
+        pause(deadline, poll_seconds)
 
 
 def dispatch_line(api, repository: str, workload: dict, source_ref: str, correlation: str, *,

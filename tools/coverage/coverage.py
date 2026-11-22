@@ -106,7 +106,11 @@ def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tu
         packages = root.findall("./packages/package")
         # WHY: A cancelled collection can leave instrumented copies that produce an empty report on the next run;
         # every report must hold lines so a healthy project cannot hide another's missing coverage (NestedSet).
-        if root.tag != "coverage" or not packages or not any(package.findall(".//line") for package in packages):
+        # WHY: The same direct class lines as the measurement below; coverlet also writes method lines, which do not
+        # count.
+        # https://github.com/coverlet-coverage/coverlet/blob/master/src/coverlet.core/Reporters/CoberturaReporter.cs
+        if root.tag != "coverage" or not packages or not any(package.findall("./classes/class/lines/line")
+                                                             for package in packages):
             raise CoverageError(f"{report} is an empty or invalid Cobertura report.")
 
         if policy["evidenceMaxAgeSeconds"] is not None:

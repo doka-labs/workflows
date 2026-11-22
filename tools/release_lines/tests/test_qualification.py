@@ -276,7 +276,8 @@ class PrQualificationTests(unittest.TestCase):
     def verify(self, predicates):
         def fake(subject, repository, predicate_type):
             self.assertEqual(attestation.PR_QUALIFICATION, predicate_type)
-            return [{"predicate": predicate, "runId": run, "attempt": attempt} for predicate, run, attempt in predicates]
+            return [{"predicate": predicate, "runId": run, "attempt": attempt}
+                    for predicate, run, attempt in predicates]
 
         return fake
 
@@ -399,9 +400,10 @@ class GateBindingTests(unittest.TestCase):
                                                                    for name in names]},
                      "runId": index + 1, "attempt": 1} for index, (workflow, names) in enumerate(attested)]
 
+        authority = {"policy": policy, "commit": "b" * 40}
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.object(qualification, "git_tree", return_value=TREE), \
-                mock.patch.object(coordinator, "observe_authority", return_value={"policy": policy, "commit": "b" * 40}), \
+                mock.patch.object(coordinator, "observe_authority", return_value=authority), \
                 mock.patch.object(qualification.policies, "freeze_line", return_value={}), \
                 mock.patch.object(qualification, "run_jobs", return_value=[
                     {"name": "release / Build", "status": "completed", "conclusion": "success"}]), \

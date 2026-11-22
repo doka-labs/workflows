@@ -149,6 +149,13 @@ def readback(directory: Path, inventory: list[dict], probes: list[dict], work: P
     """Wait until nuget.org serves every package signed and byte-identical and every Portable PDB."""
     work.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(sdk, work / "global.json")
+    # WHY: Probes of one URL count once below; they must ask for the same checksum and expect the same bytes, or one
+    # of them would never be checked.
+    for probe in probes:
+        first = next(item for item in probes if item["url"] == probe["url"])
+        if (probe["checksum"], probe["sha256"]) != (first["checksum"], first["sha256"]):
+            raise NuGetError(f"Two symbol probes of {probe['pdb']} expect different bytes at one URL.")
+
     deadline = clock() + timeout
     verified, symbols, base = {}, set(), None
     while True:

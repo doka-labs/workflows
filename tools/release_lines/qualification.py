@@ -92,7 +92,8 @@ def pr_predicate(api, policy: dict, environment: dict, event: dict, root: Path) 
     pull = event.get("pull_request", {})
     merge = environment.get("GITHUB_SHA", "")
     # WHY: For pull_request, GITHUB_SHA is "the SHA of the merge commit on the merge branch"; its tree is what
-    # the run tested. https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+    # the run tested.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
     if git_tree(root, "HEAD") != git_tree(root, merge):
         raise QualificationError("The checkout is not the merge commit this run tested.")
 
@@ -115,8 +116,8 @@ def pr_predicate(api, policy: dict, environment: dict, event: dict, root: Path) 
 def test_projects(root: Path) -> dict[str, str]:
     """Return the test projects of a restored checkout as assembly name to relative project path."""
     # WHY: Whether a project is a test project is decided by MSBuild evaluation (IsTestProject=true, set for example
-    # by Microsoft.NET.Test.Sdk.props), not by the project XML: MySql has helper and smoke projects without the property, and
-    # NestedSet's shared Specification.Tests library evaluates to false.
+    # by Microsoft.NET.Test.Sdk.props), not by the project XML: MySql has helper and smoke projects without the
+    # property, and NestedSet's shared Specification.Tests library evaluates to false.
     result = {}
     for project in source_projects(root):
         properties = evaluate(root, project, ["IsTestProject", "AssemblyName"])

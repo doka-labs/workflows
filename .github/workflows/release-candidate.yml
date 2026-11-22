@@ -47,6 +47,13 @@ jobs:
     # WHY: A bound against hangs: the attestation jobs of the three repositories took at most 1.6 minutes in 56
     # successful runs; building the symbol tool adds about one minute.
     timeout-minutes: 20
+    # WHY: Two runs of one version would stage into the same draft and decide on deletions from each other's
+    # inventory; runs of a version wait in order (up to 100) instead of cancelling a staging job midway.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency
+    concurrency:
+      group: ${{ github.repository }}-candidate-${{ inputs.version }}
+      cancel-in-progress: false
+      queue: max
 
     steps:
       - name: Check out the release source

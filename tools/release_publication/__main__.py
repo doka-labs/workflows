@@ -57,7 +57,8 @@ def main(argv: list[str] | None = None) -> int:
     candidate.add_argument("--packages", type=Path, required=True)
     candidate.add_argument("--probes", type=Path, required=True)
     candidate.add_argument("--output", type=Path, required=True)
-    candidate.add_argument("--handoff", type=Path, required=True, help="JSON file that carries the SBOMs to the SBOM jobs.")
+    candidate.add_argument("--handoff", type=Path, required=True,
+                           help="JSON file that carries the SBOMs to the SBOM jobs.")
     extract = commands.add_parser("sbom-extract", help="Write one package's SBOM from the candidate's handoff file.")
     extract.add_argument("--handoff", type=Path, required=True)
     extract.add_argument("--package", required=True)
@@ -201,7 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         # WHY: Bytes, attestations, authority, environment and tag are checked again before the release is published
         # (MySql, SafeMigrations and NestedSet).
         manifest = publication.authorize(api, environment, args.root.resolve(), args.candidate.resolve())
-        released = publication.publish_release(api, environment["GITHUB_REPOSITORY"], manifest, args.candidate.resolve())
+        released = publication.publish_release(api, environment["GITHUB_REPOSITORY"], manifest,
+                                               args.candidate.resolve())
         _summary(f"## Released {manifest['tag']}\n\n{released.get('html_url', '')}")
         return 0
     except (publication.PublicationError, packages.PackageError, nuget.NuGetError, consumers.ConsumerError,

@@ -283,10 +283,14 @@ them:
 1. `release-preflight.yml`: the run is on the current head of a line that may
    qualify or publish the version, and `CHANGELOG.md` has a dated section for
    it (`## [X.Y.Z] - YYYY-MM-DD` or `## X.Y.Z (YYYY-MM-DD)`). If a draft release
-   with a candidate exists for the version, `resume` is `true` and the run
-   continues with publication without repeating tests.
+   with a candidate exists for the version, the run resumes with publication
+   without repeating tests, but only when the draft passes the publish job's own
+   verification: every asset uploaded unchanged, the provenance and exactly the
+   staged SBOMs attested, and the release qualification. Otherwise it stops
+   and names what is missing.
 2. The repository's jobs build, test and pack. They upload the TRX results and
-   one artifact with every `.nupkg`, its `.snupkg` and a `<PackageId>.spdx.json`.
+   one artifact with every `.nupkg` and its `.snupkg`; the candidate generates
+   the SBOMs itself.
 3. `release-qualification.yml` (see above).
 4. `release-candidate.yml`: checks package identity and source binding,
    restores each package in an isolated consumer from the candidate bytes and
@@ -300,15 +304,19 @@ them:
    (run from a checkout of this repository, in the product checkout or with
    `--root`): immutable releases enabled (the job token cannot read that
    setting), clean checkout on the current head of the protected line, tag and
-   version unused, the draft's candidate built from this commit, SSH signing
-   configured with a key listed in `.github/allowed_signers`. Then the
-   maintainer creates and pushes the SSH-signed annotated tag `v<version>`.
+   version unused, the draft's candidate built from this commit and passing the
+   publish job's verification, SSH signing configured with a key listed in
+   `.github/allowed_signers`. Then the maintainer creates and pushes the
+   SSH-signed annotated tag `v<version>`. A pushed tag blocks a new candidate
+   for its version; a broken candidate is deleted before tagging, not after.
 6. `release-publish.yml` in the publisher environment: after approval it
    rechecks the assets against their attestations, the policy on `main`, the
    environment grants and the signed tag, attests the admission, pushes what
    nuget.org does not hold yet, reads every package back signed and every
    Portable PDB from the symbol server, restores every package from nuget.org
-   only in an isolated consumer, then publishes the immutable release.
+   only in an isolated consumer, compares the current draft with the candidate
+   once more, then publishes the immutable release and requires its whole asset
+   inventory to equal the candidate.
    If the readback is still pending after one hour, the job ends without
    failure and re-running it continues.
 

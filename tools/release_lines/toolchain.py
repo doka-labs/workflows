@@ -293,8 +293,8 @@ def check_lockfile(path: Path, root: Path, frameworks: list[str], patterns: list
             if not matches(name, patterns):
                 continue
 
-            # WHY: Project references appear in a lockfile with "type": "Project" and no resolved version (SafeMigrations
-            # src/*/packages.lock.json).
+            # WHY: Project references appear in a lockfile with "type": "Project" and no resolved version
+            # (SafeMigrations src/*/packages.lock.json).
             if isinstance(metadata, dict) and metadata.get("type") == "Project":
                 continue
 

@@ -96,8 +96,9 @@ def fetch_changes(repository: str, base: str, head: str, *, run=subprocess.run) 
     if not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (base, head)):
         raise LicenseExceptionError("Base and head must be full commit SHAs.")
 
-    completed = run(["gh", "api", "--paginate", "--slurp", f"repos/{repository}/dependency-graph/compare/{base}...{head}"],
-                    capture_output=True, text=True, timeout=300, check=False)
+    route = f"repos/{repository}/dependency-graph/compare/{base}...{head}"
+    completed = run(["gh", "api", "--paginate", "--slurp", route], capture_output=True, text=True, timeout=300,
+                    check=False)
     if completed.returncode:
         raise LicenseExceptionError("The dependency graph comparison could not be read.")
 

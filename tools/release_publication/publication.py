@@ -40,6 +40,10 @@ class PublicationError(RuntimeError):
     """A release step cannot prove that it acts on the qualified candidate under current authority."""
 
 
+class ReleaseInventoryError(PublicationError):
+    """The published release holds other assets than the candidate; retrying cannot change that."""
+
+
 def require(condition: bool, message: str) -> None:
     """Raise a publication error when a condition does not hold."""
     if not condition:
@@ -138,7 +142,8 @@ def release_assets(api, repository: str, release: dict) -> dict[str, dict]:
 def asset_bytes(repository: str, asset: dict) -> bytes:
     """Download one release asset by ID; drafts included, the size must match."""
     # WHY: GET /releases/tags/{tag} does not return drafts, and a draft has no tag yet; the authenticated release
-    # list and the asset endpoint with Accept: application/octet-stream do. https://docs.github.com/en/rest/releases/assets
+    # list and the asset endpoint with Accept: application/octet-stream do.
+    # https://docs.github.com/en/rest/releases/assets
     data = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
                            f"repos/{repository}/releases/assets/{asset['id']}"], capture_output=True, timeout=600,
                           check=False)
@@ -221,7 +226,8 @@ def preflight(api, environment: dict, root: Path, *, version: str, qualification
     require_release_workflow(policy, environment)
     policies.select_line(policy, source_ref, version, purpose="qualification" if qualification_only else "publication")
     commit = environment.get("GITHUB_SHA")
-    require(commit == protected_head(api, repository, source_ref), f"The run is not on the current head of {source_ref}.")
+    require(commit == protected_head(api, repository, source_ref),
+            f"The run is not on the current head of {source_ref}.")
     release_notes(root, version)
     tag = f"v{version}"
     release = release_for(api, repository, tag)
@@ -235,7 +241,8 @@ def preflight(api, environment: dict, root: Path, *, version: str, qualification
         return {"resume": True, "tag": tag}
 
     require(not tag_exists(api, repository, tag), f"{tag} exists without a release; it cannot become a candidate.")
-    # WHY: A commit that already carries another release tag was released or prepared before (MySql, SafeMigrations and NestedSet).
+    # WHY: A commit that already carries another release tag was released or prepared before (MySql, SafeMigrations
+    # and NestedSet).
     others = tags_on_commit(root, commit)
     require(not others, f"{commit} already carries the tags {', '.join(others)}.")
     # WHY: Proving the version unused before the long test runs avoids wasting them (NestedSet's preflight).
@@ -321,7 +328,10 @@ def extract_sbom(handoff_path: Path, package_id: str, directory: Path) -> Path:
 
 
 def expected_assets(manifest: dict) -> dict[str, str]:
-    """Return every asset name of the candidate besides the manifest, with its SHA-256 (MySql, SafeMigrations and NestedSet)."""
+    """Return every asset name of the candidate besides the manifest, with its SHA-256.
+
+    The asset set of MySql, SafeMigrations and NestedSet.
+    """
     result = {NOTES: manifest["notesSha256"], PROBES: manifest["probesSha256"]}
     for package in manifest["packages"]:
         result[package["nupkg"]] = package["nupkgSha256"]
@@ -332,7 +342,10 @@ def expected_assets(manifest: dict) -> dict[str, str]:
 
 
 def require_release_metadata(release: dict, manifest: dict, notes: str) -> None:
-    """Require title, notes and prerelease flag of the release to match the candidate (MySql, SafeMigrations and NestedSet)."""
+    """Require title, notes and prerelease flag of the release to match the candidate.
+
+    The rule of MySql, SafeMigrations and NestedSet.
+    """
     prerelease = policies.parse_version(manifest["version"]).is_prerelease
     require(release.get("name") == manifest["tag"] and release.get("body") == notes
             and release.get("prerelease") is prerelease,
@@ -340,7 +353,10 @@ def require_release_metadata(release: dict, manifest: dict, notes: str) -> None:
 
 
 def stage(api, repository: str, directory: Path) -> dict:
-    """Create the draft if missing and upload only missing assets; never replace one of a complete candidate (NestedSet's stage)."""
+    """Create the draft if missing and upload only missing assets; never replace one of a complete candidate.
+
+    NestedSet's stage.
+    """
     manifest = read_json(directory / CANDIDATE)
     expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
     tag = manifest["tag"]
@@ -370,10 +386,10 @@ def stage(api, repository: str, directory: Path) -> dict:
     stale = set()
     for name, asset in uploaded.items():
         # WHY: GitHub reports each asset's digest as "sha256:<hex>" (NestedSet v10.4.0: candidate.json digest
-        # sha256:23dd49fe...); the documentation only names the field ("digest: string or null"). Another size or
-        # digest means other bytes. https://docs.github.com/en/rest/releases/assets
-        same = (asset.get("size") == (directory / name).stat().st_size
-                and asset.get("digest") in (None, f"sha256:{expected[name]}"))
+        # sha256:23dd49fe...); the documentation only names the field ("digest: string or null"). Without a digest
+        # the size cannot tell two SBOMs apart, so the bytes are downloaded and hashed, as before publishing.
+        # https://docs.github.com/en/rest/releases/assets
+        same = not draft_asset_problems(repository, {name: asset}, {name: expected[name]})
         if not same:
             require(not committed, f"The asset {name} of the draft differs from the candidate.")
             stale.add(name)
@@ -487,7 +503,10 @@ def verify_signed_tag(api, root: Path, manifest: dict) -> str:
 
 
 def verify_publisher_environment(api, repository: str, policy: dict, environment_name: str) -> None:
-    """Require reviewers and exactly the active lines as branch grants, each line protected (MySql, SafeMigrations and NestedSet)."""
+    """Require reviewers and exactly the active lines as branch grants, each line protected.
+
+    The environment rule of MySql, SafeMigrations and NestedSet.
+    """
     require(environment_name == policy["release"]["environment"],
             f"The publish job runs in '{environment_name}', not in {policy['release']['environment']}.")
     base = f"repos/{repository}/environments/{quote(environment_name, safe='')}"
@@ -567,7 +586,10 @@ def verified_tag_commit(api, repository: str, tag: str) -> str:
 
 
 def latest_flag(api, repository: str, version: str) -> bool:
-    """Mark a release Latest only when it is a stable version strictly newer than the current Latest (MySql, SafeMigrations and NestedSet)."""
+    """Mark a release Latest only when it is a stable version strictly newer than the current Latest.
+
+    The Latest rule of MySql, SafeMigrations and NestedSet.
+    """
     if policies.parse_version(version).is_prerelease:
         return False
 
@@ -599,15 +621,16 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
     require(release is not None, f"The draft of {manifest['tag']} is missing.")
     require_release_metadata(release, manifest, (directory / NOTES).read_text(encoding="utf-8"))
     promote = False
+    expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
     if release.get("draft"):
         # WHY: The draft stays editable until it is published, and publishing an immutable release locks the assets
         # the draft holds at that moment, not the verified copy of this job. The current assets are compared right
         # before the edit; GitHub has no conditional edit, so verify-asset below still checks the result.
         # https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases
-        expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
+        # The Latest decision reads other releases, so it comes first and nothing lies between comparison and edit.
+        promote = latest_flag(api, repository, manifest["version"])
         problems = draft_asset_problems(repository, release_assets(api, repository, release), expected)
         require(not problems, f"The draft of {manifest['tag']} changed since its verification: {', '.join(problems)}.")
-        promote = latest_flag(api, repository, manifest["version"])
         # WHY: The release is edited by its numeric ID; a tag-based edit "could address a replacement release
         # between inspection and mutation" (MySql publish_existing_release). make_latest "Defaults to true for
         # newly published releases", so it is always set explicitly. https://docs.github.com/en/rest/releases/releases
@@ -627,7 +650,16 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
                 for path in files:
                     run(["gh", "release", "verify-asset", manifest["tag"], str(path), "--repo", repository])
 
+                # WHY: verify-asset checks the named files only; an extra asset in the published release is found
+                # by comparing the whole inventory, which an immutable release can no longer change.
+                problems = draft_asset_problems(repository, release_assets(api, repository, release), expected)
+                if problems:
+                    raise ReleaseInventoryError(f"The release {manifest['tag']} holds other assets than the "
+                                                f"candidate: {', '.join(problems)}.")
+
                 break
+            except ReleaseInventoryError:
+                raise
             except PublicationError:
                 pass
 
@@ -667,7 +699,7 @@ def signing_key_registered(root: Path, signing_key: str) -> bool:
     return bool(key) and any(key in line for line in signers if line.strip() and not line.lstrip().startswith("#"))
 
 
-def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
+def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attestation.verify) -> dict:
     """Check locally, without any write, that the checkout can be tagged for the version (NestedSet's pre_tag)."""
     repository = repository_of(root)
     release_notes(root, version)
@@ -713,6 +745,10 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
 
     require(manifest.get("commit") == commit and manifest.get("version") == version,
             f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")
+    # WHY: Once pushed, a tag blocks a new candidate for its version (preflight refuses a tag without a release), so
+    # the draft must already pass the verification the publish job runs: every asset, the provenance and exactly
+    # the SBOMs attested. A draft that fails here is deleted and rebuilt before anything is tagged.
+    require_complete_draft(api, repository, release, verify=verify)
     # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers.
     require(run(["git", "-C", str(root), "config", "--get", "gpg.format"]).strip() == "ssh",
             "Configure SSH signing (git config gpg.format ssh) before tagging.")

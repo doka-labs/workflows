@@ -217,7 +217,8 @@ def _toolchain(value: Any) -> None:
     for group in groups:
         _strings(group, PACKAGE_PATTERN, "Toolchain coherent group")
         # WHY: The lockfile check compares only framework packages; a group member outside frameworkPackages would
-        # never be compared. NuGet package IDs are case-insensitive. https://learn.microsoft.com/nuget/reference/nuspec#id
+        # never be compared. NuGet package IDs are case-insensitive.
+        # https://learn.microsoft.com/nuget/reference/nuspec#id
         outside = sorted(item for item in group if not _matches_any(item, value["frameworkPackages"]))
         if outside:
             raise PolicyError(f"Coherent group packages must be framework packages: {', '.join(outside)}.")
@@ -329,6 +330,12 @@ def validate_policy(value: Any, *, repository: str | None = None) -> dict:
     _lines(policy["lines"])
     _workloads(policy["workloads"])
     _qualification(policy["qualification"])
+    # WHY: A candidate-produced gate is a job of the release run itself, so it must belong to the release workflow;
+    # the qualification checks this again at run time.
+    foreign = sorted(gate["name"] for gate in policy["qualification"]["gates"]
+                     if gate["kind"] == "candidate-produced" and gate["workflow"] != release["workflowPath"])
+    if foreign:
+        raise PolicyError(f"Candidate-produced gates must use the release workflowPath: {', '.join(foreign)}.")
 
     return copy.deepcopy(policy)
 
