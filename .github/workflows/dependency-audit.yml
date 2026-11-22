@@ -1,0 +1,78 @@
+name: Dependency Audit
+
+# Audits every .NET project of the calling repository for known direct and
+# transitive vulnerabilities. The audit tool comes from this repository at the
+# exact commit the caller pinned.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the audit job.
+        type: string
+        default: ubuntu-24.04
+      locked-mode:
+        description: Restore with --locked-mode against the committed lock files.
+        type: boolean
+        default: true
+      retention-days:
+        description: Retention of the audit evidence artifact in days.
+        type: number
+        default: 14
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the audited repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # WHY: The tool must come from the same commit as this workflow, not from a branch head.
+      - name: Check out the audit tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+
+      - name: Audit all direct and transitive dependencies
+        env:
+          LOCKED_MODE: ${{ inputs.locked-mode }}
+        run: |
+          arguments=(--root . --output artifacts/dependency-audit)
+          if [[ "$LOCKED_MODE" != "true" ]]; then
+            arguments+=(--no-locked-mode)
+          fi
+
+          python3 -I .workflows/tools/dependency_audit/audit.py "${arguments[@]}"
+
+      # WHY: Only the listed evidence files are uploaded; the NuGet HTTP cache stays in the runner's temp directory.
+      - name: Retain audit evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/dependency-audit/summary.json
+            artifacts/dependency-audit/audit.json
+            artifacts/dependency-audit/audit.log
+            artifacts/dependency-audit/restore.log
+            artifacts/dependency-audit/restore.err.log
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}

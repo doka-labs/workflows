@@ -1,0 +1,179 @@
+import copy
+import tempfile
+import unittest
+from pathlib import Path
+
+from tools.dependency_audit import audit
+
+SOURCE = "https://api.nuget.org/v3/index.json"
+
+
+def clean_report(paths):
+    return {"version": 1, "parameters": "--vulnerable --include-transitive", "sources": [SOURCE],
+            "projects": [{"path": str(path)} for path in paths]}
+
+
+def package(identifier="Example", version="1.0.0", vulnerabilities=None):
+    return {"id": identifier, "resolvedVersion": version, "vulnerabilities": vulnerabilities or []}
+
+
+class ValidateReportTests(unittest.TestCase):
+    def setUp(self):
+        self.paths = [Path("/repo/src/A/A.csproj"), Path("/repo/tests/B/B.csproj")]
+
+    def test_clean_report_without_frameworks_passes(self):
+        # Arrange
+        report = clean_report(self.paths)
+
+        # Act
+        count = audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertEqual(2, count)
+
+    def test_vulnerable_transitive_package_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        report["projects"][0]["frameworks"] = [{"framework": "net10.0", "transitivePackages": [
+            package("System.Text.Json", "8.0.0", [{"severity": "High", "advisoryurl": "https://example.test"}])]}]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("System.Text.Json 8.0.0", str(raised.exception))
+
+    def test_missing_transitive_flag_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        report["parameters"] = "--vulnerable"
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("--include-transitive", str(raised.exception))
+
+    def test_other_source_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        report["sources"] = [SOURCE, "https://example.test/v3/index.json"]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("only source", str(raised.exception))
+
+    def test_reported_problem_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        report["problems"] = [{"text": "Advisory source unavailable"}]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("problems", str(raised.exception))
+
+    def test_missing_project_fails(self):
+        # Arrange
+        report = clean_report(self.paths[:1])
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("exactly the project files", str(raised.exception))
+
+    def test_repeated_package_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        report["projects"][0]["frameworks"] = [{"framework": "net10.0", "topLevelPackages": [package(), package()]}]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, self.paths)
+
+        # Assert
+        self.assertIn("incomplete or repeated", str(raised.exception))
+
+    def test_package_without_vulnerability_list_fails(self):
+        # Arrange
+        report = clean_report(self.paths)
+        incomplete = package()
+        del incomplete["vulnerabilities"]
+        report["projects"][0]["frameworks"] = [{"framework": "net10.0", "topLevelPackages": [incomplete]}]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(copy.deepcopy(report), self.paths)
+
+        # Assert
+        self.assertIn("incomplete or repeated", str(raised.exception))
+
+
+class SourceProjectTests(unittest.TestCase):
+    def test_build_output_and_hidden_directories_are_ignored(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative in ("src/A/A.csproj", "src/A/bin/Copy.csproj", "src/A/obj/Copy.csproj",
+                             ".workflows/tools/Helper.csproj", "examples/E/E.csproj"):
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text("<Project />", encoding="utf-8")
+
+            # Act
+            projects = [path.relative_to(root.resolve()).as_posix() for path in audit.source_projects(root)]
+
+        # Assert
+        self.assertEqual(["examples/E/E.csproj", "src/A/A.csproj"], projects)
+
+    def test_repository_without_projects_fails(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            # Act
+            with self.assertRaises(audit.AuditError) as raised:
+                audit.source_projects(Path(directory))
+
+        # Assert
+        self.assertIn("no project file", str(raised.exception))
+
+
+class CacheLocationTests(unittest.TestCase):
+    def test_cache_inside_evidence_fails(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            cache = evidence / "http-cache"
+            cache.mkdir(parents=True)
+
+            # Act
+            with self.assertRaises(audit.AuditError) as raised:
+                audit.require_outside(cache, evidence)
+
+        # Assert
+        self.assertIn("outside", str(raised.exception))
+
+    def test_cache_beside_evidence_passes(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            cache = Path(directory) / "cache"
+            evidence.mkdir()
+            cache.mkdir()
+
+            # Act
+            result = audit.require_outside(cache, evidence)
+
+        # Assert
+        self.assertIsNone(result)
+
+
+if __name__ == "__main__":
+    unittest.main()

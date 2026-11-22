@@ -1,0 +1,104 @@
+name: Dependency Review
+
+# Reviews the dependency delta of a pull request before it can merge. GitHub's
+# Automatic Dependency Submission owns the resolved graph, and the official
+# review action owns bounded retries while that graph propagates.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the review job.
+        type: string
+        default: ubuntu-24.04
+      fail-on-severity:
+        description: Lowest advisory severity that fails the review.
+        type: string
+        default: high
+      allow-licenses:
+        description: Comma-separated SPDX identifiers allowed by the repository dependency policy.
+        type: string
+        default: >-
+          Apache-2.0,
+          BSD-2-Clause,
+          BSD-3-Clause,
+          CC0-1.0,
+          ISC,
+          MIT,
+          MIT-0,
+          PostgreSQL,
+          Unlicense
+      license-exceptions:
+        description: >-
+          Comma-separated NuGet package URLs with exact versions (pkg:nuget/Name@1.2.3) whose
+          reviewed license files replace an SPDX expression. Any other version of these packages fails.
+        type: string
+        # WHY: These native Microsoft packages ship reviewed license files rather than SPDX expressions.
+        default: >-
+          pkg:nuget/Microsoft.Data.SqlClient.SNI.runtime@6.0.3,
+          pkg:nuget/Microsoft.Identity.Client.NativeInterop@0.20.6
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: Review
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # WHY: The tool must come from the same commit as this workflow, not from a branch head.
+      - name: Check out the review tool
+        if: ${{ inputs.license-exceptions != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      # Packages whose license metadata is absent are reported separately
+      # rather than blocked, so a missing SPDX field cannot masquerade as a
+      # policy breach.
+      - name: Review dependency changes
+        id: review
+        uses: actions/dependency-review-action@bbc44d14a204704ccc493733616cd1e93a0321ec # v5.0.1
+        with:
+          base-ref: ${{ github.event.pull_request.base.sha }}
+          head-ref: ${{ github.event.pull_request.head.sha }}
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          allow-licenses: ${{ inputs.allow-licenses }}
+          allow-dependencies-licenses: ${{ inputs.license-exceptions }}
+          comment-summary-in-pr: never
+          # WHY: OpenSSF Scorecard is not part of the shared standard; the action declares no default.
+          show-openssf-scorecard: false
+          # The official action owns the bounded wait for submitted snapshots;
+          # this workflow does not implement a second snapshot state machine.
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 180
+
+      - name: Require exact license-exception versions
+        if: ${{ inputs.license-exceptions != '' }}
+        env:
+          DEPENDENCY_CHANGES_FILE: ${{ runner.temp }}/dependency-review-output.json
+          LICENSE_EXCEPTIONS: ${{ inputs.license-exceptions }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # WHY: The full comparison can exceed Linux's per-environment-string limit. Serialize it as one JSON
+          # string in a quoted heredoc so dependency metadata cannot execute shell code or terminate the data.
+          cat > "$DEPENDENCY_CHANGES_FILE" <<'DEPENDENCY_REVIEW_OUTPUT'
+          ${{ toJSON(steps.review.outputs.dependency-changes) }}
+          DEPENDENCY_REVIEW_OUTPUT
+
+          python3 -I .workflows/tools/dependency_review/license_exceptions.py \
+            --changes "$DEPENDENCY_CHANGES_FILE" --exceptions "$LICENSE_EXCEPTIONS"
