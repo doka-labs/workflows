@@ -57,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     candidate.add_argument("--packages", type=Path, required=True)
     candidate.add_argument("--probes", type=Path, required=True)
     candidate.add_argument("--output", type=Path, required=True)
+    candidate.add_argument("--handoff", type=Path, required=True, help="JSON file that carries the SBOMs to the SBOM jobs.")
+    extract = commands.add_parser("sbom-extract", help="Write one package's SBOM from the candidate's handoff file.")
+    extract.add_argument("--handoff", type=Path, required=True)
+    extract.add_argument("--package", required=True)
+    extract.add_argument("--packages", type=Path, required=True)
     pre_tag = commands.add_parser("pre-tag", help="Check locally that the checkout can be tagged; no writes.")
     pre_tag.add_argument("--root", type=Path, default=Path.cwd())
     pre_tag.add_argument("--version", required=True)
@@ -74,7 +79,8 @@ def main(argv: list[str] | None = None) -> int:
     authorize.add_argument("--output", type=Path, required=True)
     pending = commands.add_parser("pending-packages")
     pending.add_argument("--candidate", type=Path, required=True)
-    pending.add_argument("--output", type=Path, required=True)
+    pending.add_argument("--output", type=Path, required=True, help="Primary packages nuget.org does not hold.")
+    pending.add_argument("--symbols-output", type=Path, required=True, help="Every symbol package.")
     readback = commands.add_parser("readback")
     readback.add_argument("--candidate", type=Path, required=True)
     readback.add_argument("--work", type=Path, required=True)
@@ -117,11 +123,17 @@ def main(argv: list[str] | None = None) -> int:
             manifest = publication.candidate(api, environment, args.root.resolve(), version=args.version,
                                              directory=args.packages.resolve(), probes=args.probes.resolve(),
                                              output=args.output.resolve())
+            publication.write_sbom_handoff(manifest, args.output.resolve(), args.handoff.resolve())
             _output("packages", json.dumps([item["id"] for item in manifest["packages"]]))
             _summary(f"## Release candidate {manifest['version']}\n\nCheck locally with `python3 -E -s -m "
                      f"tools.release_publication pre-tag --version {manifest['version']}`, tag the qualified commit "
                      f"with an SSH-signed annotated tag, push the tag to origin, then approve the publication:"
                      f"\n\n```sh\ngit tag -s {manifest['tag']} {manifest['commit']} -m \"{manifest['tag']}\"\n```\n")
+            return 0
+
+        if args.command == "sbom-extract":
+            path = publication.extract_sbom(args.handoff.resolve(), args.package, args.packages.resolve())
+            print(f"Wrote {path.name}.")
             return 0
 
         if args.command == "pre-tag":
@@ -159,9 +171,13 @@ def main(argv: list[str] | None = None) -> int:
             absent = [item["id"] for item in states if item["state"] == "absent"]
             rows = [package for package in manifest["packages"] if package["id"] in absent]
             # WHY: Every primary package before every symbol package, each list in dependency order (NestedSet).
-            args.output.write_text("".join(f"{row['nupkg']}\n" for row in rows)
-                                   + "".join(f"{row['snupkg']}\n" for row in rows), encoding="ascii")
-            print(f"{len(rows)} of {len(manifest['packages'])} packages still need to be pushed.")
+            # Symbol packages are listed for every package, not only for pending primaries: an attempt that stopped
+            # after a primary push would otherwise never push its symbols. NestedSet and SafeMigrations push all
+            # symbol packages with --skip-duplicate on every publication run for the same reason.
+            args.output.write_text("".join(f"{row['nupkg']}\n" for row in rows), encoding="ascii")
+            args.symbols_output.write_text("".join(f"{row['snupkg']}\n" for row in manifest["packages"]),
+                                           encoding="ascii")
+            print(f"{len(rows)} of {len(manifest['packages'])} primary packages still need to be pushed.")
             return 0
 
         if args.command == "readback":

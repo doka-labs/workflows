@@ -95,17 +95,27 @@ def verify(subject: Path, repository: str, predicate_type: str, *, signer: str |
     return result
 
 
-def exists(api, repository: str, subject: Path) -> bool:
-    """Return whether any attestation names the subject; a failed read raises instead of meaning none."""
+def exists(api, repository: str, subject: Path, predicate_type: str) -> bool:
+    """Return whether an attestation of the predicate type names the subject; a failed read never means none."""
+    import hashlib
+
+    return exists_for_digest(api, repository, hashlib.sha256(subject.read_bytes()).hexdigest(), predicate_type)
+
+
+def exists_for_digest(api, repository: str, digest: str, predicate_type: str) -> bool:
+    """Return whether an attestation of the predicate type names the SHA-256 digest."""
     # WHY: GitHub answers 404 for a repository without attestations and 200 with an empty list for one without
     # attestations of this digest (observed for doka-labs and cli/cli); any other answer proves nothing, and a
     # failed read must never count as absence (SafeMigrations latest.py, release run 42767338686 attempt 2).
+    # predicate_type is the "Optional filter for fetching attestations with a given predicate type"; without it the
+    # provenance of candidate.json counted as an earlier admission. With the filter, a digest that carries only other
+    # types also answers 404 (NestedSet v10.4.0 candidate.json: SLSA provenance listed, other types 404).
     # https://docs.github.com/en/rest/repos/attestations#list-attestations
-    import hashlib
+    from urllib.parse import quote
 
-    digest = hashlib.sha256(subject.read_bytes()).hexdigest()
     try:
-        response = api.request(f"repos/{repository}/attestations/sha256:{digest}?per_page=1")
+        response = api.request(f"repos/{repository}/attestations/sha256:{digest}?per_page=1"
+                               f"&predicate_type={quote(predicate_type, safe='')}")
     except GitHubError as error:
         if error.code == "github_http_error" and error.http_status == 404:
             return False

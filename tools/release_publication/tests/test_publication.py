@@ -1,8 +1,10 @@
 import json
 import tempfile
 import unittest
+import unittest.mock
 import zipfile
 from pathlib import Path
+from urllib.parse import unquote
 
 from tools.release_lines import attestation
 from tools.release_lines.github import GitHubError
@@ -697,7 +699,7 @@ class AttestationExistsTests(unittest.TestCase):
         api = FakeApi({})
 
         # Act
-        found = attestation.exists(api, REPOSITORY, self.subject)
+        found = attestation.exists(api, REPOSITORY, self.subject, attestation.RELEASE_ADMISSION)
 
         # Assert
         self.assertFalse(found)
@@ -707,7 +709,7 @@ class AttestationExistsTests(unittest.TestCase):
         api = FakeApi({self.route: {"attestations": []}})
 
         # Act
-        found = attestation.exists(api, REPOSITORY, self.subject)
+        found = attestation.exists(api, REPOSITORY, self.subject, attestation.RELEASE_ADMISSION)
 
         # Assert
         self.assertFalse(found)
@@ -718,7 +720,7 @@ class AttestationExistsTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(GitHubError) as raised:
-            attestation.exists(api, REPOSITORY, self.subject)
+            attestation.exists(api, REPOSITORY, self.subject, attestation.RELEASE_ADMISSION)
 
         # Assert
         self.assertEqual(502, raised.exception.http_status)
@@ -728,10 +730,206 @@ class AttestationExistsTests(unittest.TestCase):
         api = FakeApi({self.route: {"attestations": [{"bundle": {}}]}})
 
         # Act
-        found = attestation.exists(api, REPOSITORY, self.subject)
+        found = attestation.exists(api, REPOSITORY, self.subject, attestation.RELEASE_ADMISSION)
 
         # Assert
         self.assertTrue(found)
+
+
+    def test_listing_is_filtered_by_predicate_type(self):
+        # Arrange
+        api = RecordingApi({"attestations": []})
+
+        # Act
+        attestation.exists(api, REPOSITORY, self.subject, attestation.RELEASE_ADMISSION)
+
+        # Assert
+        self.assertIn("&predicate_type=https%3A%2F%2Fgithub.com%2Fdoka-labs%2Fworkflows%2Fblob%2Fmain%2Fdocs%2F"
+                      "predicates%2Frelease-admission-v1.md", api.routes[0])
+
+
+class RecordingApi:
+    def __init__(self, answer):
+        self.answer = answer
+        self.routes = []
+
+    def request(self, route, method="GET", payload=None):
+        self.routes.append(route)
+        return self.answer
+
+
+class FirstAdmissionTests(unittest.TestCase):
+    def test_provenance_of_the_manifest_is_not_an_earlier_admission(self):
+        # Arrange
+        directory = Path(tempfile.mkdtemp())
+        (directory / publication.CANDIDATE).write_text("{}", encoding="ascii")
+        route = f"repos/{REPOSITORY}/attestations/sha256:{packages.sha256(directory / publication.CANDIDATE)}"
+        types = {attestation.SLSA_PROVENANCE}
+
+        class TypedApi:
+            def request(self, value, method="GET", payload=None):
+                requested = unquote(value.split("predicate_type=", 1)[1])
+                if value.startswith(route) and requested in types:
+                    return {"attestations": [{"bundle": {}}]}
+
+                raise GitHubError("missing", code="github_http_error", http_status=404)
+
+        # Act
+        found = attestation.exists(TypedApi(), REPOSITORY, directory / publication.CANDIDATE,
+                                   attestation.RELEASE_ADMISSION)
+
+        # Assert
+        self.assertFalse(found)
+
+
+class CompleteDraftTests(unittest.TestCase):
+    def setUp(self):
+        self.manifest = {"packages": [{"id": "Doka.Core", "nupkg": "Doka.Core.1.2.3.nupkg", "nupkgSha256": "a" * 64,
+                                       "snupkg": "Doka.Core.1.2.3.snupkg", "snupkgSha256": "b" * 64}],
+                         "sboms": {"Doka.Core.spdx.json": {"sha256": "c" * 64, "package": "Doka.Core.1.2.3.nupkg",
+                                                           "predicateType": "https://spdx.dev/Document/v2.2"}},
+                         "notesSha256": "d" * 64, "probesSha256": "e" * 64}
+        self.data = json.dumps(self.manifest).encode()
+        expected = publication.expected_assets(self.manifest)
+        self.assets = {name: {"id": index, "name": name, "state": "uploaded", "digest": f"sha256:{digest}"}
+                       for index, (name, digest) in enumerate(expected.items())}
+        self.assets[publication.CANDIDATE] = {"id": 99, "name": publication.CANDIDATE, "state": "uploaded",
+                                              "size": len(self.data)}
+        self.attested = {attestation.SLSA_PROVENANCE, "https://spdx.dev/Document/v2.2"}
+
+    def check(self):
+        original = (publication.release_assets, publication.asset_bytes, attestation.exists_for_digest)
+        publication.release_assets = lambda api, repository, release: self.assets
+        publication.asset_bytes = lambda repository, asset: self.data
+        attestation.exists_for_digest = lambda api, repository, digest, kind: kind in self.attested
+        try:
+            publication.require_complete_draft(None, REPOSITORY, {"tag_name": "v1.2.3"})
+        finally:
+            publication.release_assets, publication.asset_bytes, attestation.exists_for_digest = original
+
+    def test_complete_draft_resumes(self):
+        # Arrange
+        self.attested.add(attestation.RELEASE_ADMISSION)
+
+        # Act
+        result = self.check()
+
+        # Assert
+        self.assertIsNone(result)
+
+    def test_missing_asset_stops(self):
+        # Arrange
+        del self.assets["Doka.Core.1.2.3.snupkg"]
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.check()
+
+        # Assert
+        self.assertIn("Doka.Core.1.2.3.snupkg", str(raised.exception))
+
+    def test_unfinished_asset_stops(self):
+        # Arrange
+        self.assets["Doka.Core.spdx.json"]["state"] = "starter"
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.check()
+
+        # Assert
+        self.assertIn("Doka.Core.spdx.json", str(raised.exception))
+
+    def test_missing_sbom_attestation_stops(self):
+        # Arrange
+        self.attested.discard("https://spdx.dev/Document/v2.2")
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.check()
+
+        # Assert
+        self.assertIn("SBOM attestation of Doka.Core.1.2.3.nupkg", str(raised.exception))
+
+
+class SbomHandoffTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        (self.directory / "Doka.Core.1.2.3.nupkg").write_bytes(b"package")
+        (self.directory / "Doka.Core.spdx.json").write_text('{"spdxVersion": "SPDX-2.2"}\n', encoding="utf-8")
+        self.manifest = {"packages": [{"id": "Doka.Core", "nupkg": "Doka.Core.1.2.3.nupkg",
+                                       "nupkgSha256": packages.sha256(self.directory / "Doka.Core.1.2.3.nupkg")}],
+                         "sboms": {"Doka.Core.spdx.json": {
+                             "sha256": packages.sha256(self.directory / "Doka.Core.spdx.json"),
+                             "package": "Doka.Core.1.2.3.nupkg"}}}
+        self.handoff = self.directory / "handoff" / "sboms.json"
+        publication.write_sbom_handoff(self.manifest, self.directory, self.handoff)
+        self.target = self.directory / "job"
+        self.target.mkdir()
+        (self.target / "Doka.Core.1.2.3.nupkg").write_bytes(b"package")
+
+    def test_extracted_sbom_has_the_candidate_bytes(self):
+        # Arrange
+        expected = (self.directory / "Doka.Core.spdx.json").read_bytes()
+
+        # Act
+        path = publication.extract_sbom(self.handoff, "Doka.Core", self.target)
+
+        # Assert
+        self.assertEqual(expected, path.read_bytes())
+
+    def test_other_package_bytes_fail(self):
+        # Arrange
+        (self.target / "Doka.Core.1.2.3.nupkg").write_bytes(b"other")
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.extract_sbom(self.handoff, "Doka.Core", self.target)
+
+        # Assert
+        self.assertIn("differs from the candidate", str(raised.exception))
+
+
+class PendingPackagesTests(unittest.TestCase):
+    def run_pending(self, states):
+        from tools.release_publication import __main__ as cli
+
+        directory = Path(tempfile.mkdtemp())
+        manifest = {"packages": [{"id": name, "nupkg": f"{name}.1.0.0.nupkg", "snupkg": f"{name}.1.0.0.snupkg"}
+                                 for name in ("Doka.Core", "Doka.Ext")]}
+        original = (publication.verify_candidate, nuget.availability)
+        publication.verify_candidate = lambda repository, path: manifest
+        nuget.availability = lambda path, rows: [{"id": name, "state": state} for name, state in states.items()]
+        try:
+            with unittest.mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": REPOSITORY}):
+                cli.main(["pending-packages", "--candidate", str(directory), "--output", str(directory / "p.txt"),
+                          "--symbols-output", str(directory / "s.txt")])
+        finally:
+            publication.verify_candidate, nuget.availability = original
+
+        return ((directory / "p.txt").read_text(encoding="ascii").split(),
+                (directory / "s.txt").read_text(encoding="ascii").split())
+
+    def test_symbols_of_pushed_primaries_are_pushed_again(self):
+        # Arrange
+        states = {"Doka.Core": "present", "Doka.Ext": "present"}
+
+        # Act
+        primaries, symbols = self.run_pending(states)
+
+        # Assert
+        self.assertEqual([], primaries)
+        self.assertEqual(["Doka.Core.1.0.0.snupkg", "Doka.Ext.1.0.0.snupkg"], symbols)
+
+    def test_only_absent_primaries_are_pending(self):
+        # Arrange
+        states = {"Doka.Core": "present", "Doka.Ext": "absent"}
+
+        # Act
+        primaries, symbols = self.run_pending(states)
+
+        # Assert
+        self.assertEqual(["Doka.Ext.1.0.0.nupkg"], primaries)
+        self.assertEqual(2, len(symbols))
 
 
 class UnusedVersionTests(unittest.TestCase):

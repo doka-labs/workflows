@@ -118,7 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >-
           python3 -E -s -m tools.release_publication pending-packages --candidate "$RUNNER_TEMP/candidate"
-          --output "$RUNNER_TEMP/pending.txt"
+          --output "$RUNNER_TEMP/pending.txt" --symbols-output "$RUNNER_TEMP/symbols.txt"
 
       - name: Obtain a short-lived NuGet credential
         id: login
@@ -136,17 +136,25 @@ jobs:
         run: python3 -E -s -m tools.release_publication recheck --root "$GITHUB_WORKSPACE/repository" --candidate "$RUNNER_TEMP/candidate"
 
       # WHY: --skip-duplicate keeps a package that another attempt pushed in the meantime from failing the push;
-      # its bytes were compared with the candidate in the previous step and are read back below.
+      # its bytes were compared with the candidate in the previous step and are read back below. --no-symbols
+      # keeps the primary push from also pushing the .snupkg next to it, so every primary precedes every symbol
+      # package; the symbol packages follow for every package, because an attempt can stop between the two
+      # pushes (NestedSet and SafeMigrations push all symbol packages with --skip-duplicate on every run).
       # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-push
-      - name: Push the pending packages
+      - name: Push the pending packages, then every symbol package
         env:
           NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           while IFS= read -r package; do
             [ -n "$package" ] || continue
             dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
-              --api-key "$NUGET_API_KEY" --skip-duplicate --timeout 300
+              --api-key "$NUGET_API_KEY" --no-symbols --skip-duplicate --timeout 300
           done < "$RUNNER_TEMP/pending.txt"
+          while IFS= read -r package; do
+            [ -n "$package" ] || continue
+            dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
+              --api-key "$NUGET_API_KEY" --skip-duplicate --timeout 300
+          done < "$RUNNER_TEMP/symbols.txt"
 
       - name: Read the packages and symbols back from nuget.org
         id: readback
@@ -156,7 +164,7 @@ jobs:
         run: python3 -E -s -m tools.release_publication readback --candidate "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/readback"
 
       # WHY: A consumer that restores each package from nuget.org only must receive the candidate's payload before
-      # the release is published (Baustein 9; Bestand N8, MySql's isolated consumer).
+      # the release is published (MySql's isolated consumer).
       - name: Restore every package from nuget.org in an isolated consumer
         if: steps.readback.outputs.complete == 'true'
         working-directory: .workflows

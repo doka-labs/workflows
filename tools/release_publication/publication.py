@@ -8,6 +8,7 @@ NestedSet; each names its origin.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
@@ -134,6 +135,49 @@ def release_assets(api, repository: str, release: dict) -> dict[str, dict]:
     raise PublicationError("The release asset listing exceeded its page bound.")
 
 
+def asset_bytes(repository: str, asset: dict) -> bytes:
+    """Download one release asset by ID; drafts included, the size must match."""
+    # WHY: GET /releases/tags/{tag} does not return drafts, and a draft has no tag yet; the authenticated release
+    # list and the asset endpoint with Accept: application/octet-stream do. https://docs.github.com/en/rest/releases/assets
+    data = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
+                           f"repos/{repository}/releases/assets/{asset['id']}"], capture_output=True, timeout=600,
+                          check=False)
+    require(data.returncode == 0 and len(data.stdout) == asset.get("size"), f"Cannot download {asset.get('name')}.")
+    return data.stdout
+
+
+def require_complete_draft(api, repository: str, release: dict) -> None:
+    """Require a draft that a resumed run can publish: every asset uploaded unchanged, provenance and SBOMs attested."""
+    assets = release_assets(api, repository, release)
+    manifest = json.loads(asset_bytes(repository, assets[CANDIDATE]))
+    expected = expected_assets(manifest)
+    problems = sorted(set(expected) ^ (set(assets) - {CANDIDATE}))
+    for name, digest in expected.items():
+        asset = assets.get(name)
+        if asset is None:
+            continue
+
+        # WHY: GitHub reports each asset's digest as "sha256:<hex>"; without one the bytes are hashed here.
+        # https://docs.github.com/en/rest/releases/assets
+        actual = asset.get("digest") or f"sha256:{hashlib.sha256(asset_bytes(repository, asset)).hexdigest()}"
+        if asset.get("state") != "uploaded" or actual != f"sha256:{digest}":
+            problems.append(name)
+
+    candidate_digest = hashlib.sha256(asset_bytes(repository, assets[CANDIDATE])).hexdigest()
+    if not attestation.exists_for_digest(api, repository, candidate_digest, attestation.SLSA_PROVENANCE):
+        problems.append(f"provenance of {CANDIDATE}")
+
+    for sbom in manifest["sboms"].values():
+        package = next(item for item in manifest["packages"] if item["nupkg"] == sbom["package"])
+        if not attestation.exists_for_digest(api, repository, package["nupkgSha256"], sbom["predicateType"]):
+            problems.append(f"SBOM attestation of {sbom['package']}")
+
+    # WHY: A resumed run skips the candidate jobs, so a draft they did not finish could never be published; a new
+    # build would produce other bytes than the staged ones, which stage refuses (R2).
+    require(not problems, f"The draft of {release.get('tag_name')} is incomplete ({', '.join(problems)}); re-run the "
+                          "failed candidate jobs of its run, or delete the draft and start a new run.")
+
+
 def tag_exists(api, repository: str, tag: str) -> bool:
     """Return whether the tag exists on GitHub."""
     try:
@@ -176,6 +220,9 @@ def preflight(api, environment: dict, root: Path, *, version: str, qualification
         require(not qualification_only, f"{tag} already has a release; qualify another version.")
         require(CANDIDATE in release_assets(api, repository, release),
                 f"The release of {tag} has no {CANDIDATE}; delete the draft to start over.")
+        if release.get("draft") is True:
+            require_complete_draft(api, repository, release)
+
         return {"resume": True, "tag": tag}
 
     require(not tag_exists(api, repository, tag), f"{tag} exists without a release; it cannot become a candidate.")
@@ -232,6 +279,36 @@ def candidate(api, environment: dict, root: Path, *, version: str, directory: Pa
         (output / path.name).write_bytes(path.read_bytes())
 
     return manifest
+
+
+def write_sbom_handoff(manifest: dict, directory: Path, path: Path) -> None:
+    """Write the candidate's SBOMs and the digests of their packages into one JSON file for the SBOM jobs."""
+    # WHY: The SBOM jobs run on other runners. Artifact uploads of this repository are single named text files
+    # (tools/repository_checks/artifact_uploads.py), so the SBOMs travel as one JSON file and the packages, which
+    # are the subjects, come from the caller's packages artifact the candidate was built from.
+    handoff = {"schemaVersion": 1, "packages": {}}
+    for name, sbom in manifest["sboms"].items():
+        package = next(item for item in manifest["packages"] if item["nupkg"] == sbom["package"])
+        handoff["packages"][package["id"]] = {"nupkg": package["nupkg"], "nupkgSha256": package["nupkgSha256"],
+                                              "sbomName": name, "sbomSha256": sbom["sha256"],
+                                              "sbom": (directory / name).read_text(encoding="utf-8")}
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(handoff, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def extract_sbom(handoff_path: Path, package_id: str, directory: Path) -> Path:
+    """Write one package's SBOM next to its package; both must equal the candidate's digests."""
+    handoff = read_json(handoff_path)
+    require(handoff.get("schemaVersion") == 1 and package_id in handoff.get("packages", {}),
+            f"The SBOM handoff has no entry for {package_id}.")
+    entry = handoff["packages"][package_id]
+    require(packages.sha256(directory / entry["nupkg"]) == entry["nupkgSha256"],
+            f"{entry['nupkg']} differs from the candidate.")
+    path = directory / entry["sbomName"]
+    path.write_text(entry["sbom"], encoding="utf-8")
+    require(packages.sha256(path) == entry["sbomSha256"], f"{path.name} differs from the candidate.")
+    return path
 
 
 def expected_assets(manifest: dict) -> dict[str, str]:
@@ -301,19 +378,13 @@ def stage(api, repository: str, directory: Path) -> dict:
 
 def download_candidate(api, repository: str, tag: str, output: Path) -> list[str]:
     """Download every asset of the tag's release, including a draft, by release ID."""
-    # WHY: GET /releases/tags/{tag} does not return drafts, and a draft has no tag yet; the authenticated release
-    # list and the asset endpoint with Accept: application/octet-stream do. https://docs.github.com/en/rest/releases/assets
     release = release_for(api, repository, tag)
     require(release is not None, f"No release or draft for {tag}.")
     output.mkdir(parents=True, exist_ok=True)
     names = []
     for name, asset in sorted(release_assets(api, repository, release).items()):
         require(re.fullmatch(r"[A-Za-z0-9._+-]+", name) is not None, f"Unexpected asset name {name!r}.")
-        data = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
-                               f"repos/{repository}/releases/assets/{asset['id']}"], capture_output=True,
-                              timeout=600, check=False)
-        require(data.returncode == 0 and len(data.stdout) == asset.get("size"), f"Cannot download {name}.")
-        (output / name).write_bytes(data.stdout)
+        (output / name).write_bytes(asset_bytes(repository, asset))
         names.append(name)
 
     return names
@@ -447,14 +518,9 @@ def authorize(api, environment: dict, root: Path, directory: Path, *, verify=att
     # WHY: Earlier admissions, from earlier attempts or runs, must name the same candidate and tag object; a
     # different one would mean two candidates for one version (F5, F6 of all three repositories).
     earlier = (verify(directory / CANDIDATE, repository, attestation.RELEASE_ADMISSION)
-               if exists(api, repository, directory / CANDIDATE, attestation.RELEASE_ADMISSION) else [])
+               if attestation.exists(api, repository, directory / CANDIDATE, attestation.RELEASE_ADMISSION) else [])
     require_same_admissions(earlier, manifest)
     return manifest
-
-
-def exists(api, repository: str, subject: Path, predicate_type: str) -> bool:
-    """Return whether the subject has attestations; only a proven absence returns False."""
-    return attestation.exists(api, repository, subject)
 
 
 def require_same_admissions(earlier: list[dict], manifest: dict) -> None:
@@ -602,13 +668,7 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
     # WHY: The tag must point at the commit the draft's candidate was built from (V6, NestedSet).
     asset = release_assets(api, repository, release).get(CANDIDATE)
     require(asset is not None, f"The draft of {tag} has no {CANDIDATE}.")
-    data = subprocess.run(["gh", "api", "-H", "Accept: application/octet-stream",
-                           f"repos/{repository}/releases/assets/{asset['id']}"], capture_output=True, timeout=120,
-                          check=False)
-    require(data.returncode == 0, f"Cannot read {CANDIDATE} of the draft.")
-    with tempfile.TemporaryDirectory(prefix="pre-tag-") as directory:
-        (Path(directory) / CANDIDATE).write_bytes(data.stdout)
-        manifest = read_json(Path(directory) / CANDIDATE)
+    manifest = json.loads(asset_bytes(repository, asset))
 
     require(manifest.get("commit") == commit and manifest.get("version") == version,
             f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")

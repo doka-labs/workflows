@@ -37,9 +37,14 @@ jobs:
   preflight:
     name: Preflight
     # WHY: "Only users with push access will receive listings for draft releases"; the preflight must see drafts.
+    # It also lists the attestations of a draft before resuming it: "attestations: read|write|none" is a
+    # GITHUB_TOKEN permission, and listing attestations needs read access.
     # https://docs.github.com/en/rest/releases/releases#list-releases
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+    # https://docs.github.com/en/rest/repos/attestations#list-attestations
     permissions:
       contents: write
+      attestations: read
     runs-on: ${{ inputs.runs-on }}
     # WHY: A bound against hangs: the preflight jobs of MySql and NestedSet took at most 0.8 minutes in 32
     # successful runs; 10 minutes is NestedSet's limit.

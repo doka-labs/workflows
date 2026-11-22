@@ -240,7 +240,7 @@ def generate(directory: Path, inventory: list[dict], version: str, tool: Path, s
 
 
 def verify_public(directory: Path, inventory: list[dict], version: str, sdk: Path, output: Path) -> list[dict]:
-    """Restore each published package from nuget.org only and require the candidate's payload (Baustein 9, N8)."""
+    """Restore each published package from nuget.org only and require the candidate's payload (MySql)."""
     output.mkdir(parents=True, exist_ok=True)
     result = []
     with tempfile.TemporaryDirectory(prefix="public-consumers-") as temporary:

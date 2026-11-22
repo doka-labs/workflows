@@ -247,7 +247,7 @@ later run of the same version finds the draft and continues at publication.
 ```mermaid
 flowchart TB
   start(["workflow_dispatch<br/>version, qualification-only"]) --> pre["release-preflight<br/>see 10"]
-  pre --> resume{"release with candidate.json<br/>for this version?"}
+  pre --> resume{"release with candidate.json<br/>for this version, a draft complete?"}
   resume -- "yes: resume" --> publish
   resume -- no --> build["product jobs<br/>build, tests (TRX), packages"]
   build --> qual["release-qualification<br/>see 11"]
@@ -273,7 +273,9 @@ flowchart TB
   r1 -- yes --> f1(["fail: qualify another version"])
   r1 -- no --> r2{"has candidate.json?"}
   r2 -- no --> f2(["fail: delete the draft to start over"])
-  r2 -- yes --> out1(["resume=true"])
+  r2 -- yes --> r3{"draft: every expected asset uploaded unchanged,<br/>provenance of candidate.json and every<br/>SBOM attestation present?"}
+  r3 -- no --> f3(["fail: re-run the failed candidate jobs,<br/>or delete the draft and start a new run"])
+  r3 -- yes --> out1(["resume=true"])
   r -- no --> t1["tag v&lt;version&gt; does not exist"] --> t2["commit carries no other tag"] --> t3["version absent on nuget.org<br/>for every release package"] --> out2(["resume=false"])
 ```
 
@@ -303,9 +305,9 @@ flowchart TB
   c4 --> c5["Portable PDBs match their assemblies,<br/>symbol probes derived (tools/NuGetSymbols)"]
   c5 --> c6["packages bound to repository and commit,<br/>exactly release.packages, versions unused,<br/>write candidate.json"]
   c6 --> c7[("attest SLSA provenance<br/>packages and candidate.json")]
-  c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>.nupkg and .spdx.json")]
+  c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>sboms.json: every SBOM with its digest<br/>and its package's digest")]
   c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal, uploaded assets equal,<br/>unfinished assets deleted, missing ones uploaded"]
-  c8 --> s1["SBOM job per package"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
+  c8 --> s1["SBOM job per package: packages artifact and sboms.json,<br/>write the SBOM, both digests equal the candidate"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
 ```
 
 ## 13. Publish job
@@ -321,7 +323,7 @@ flowchart TB
   adm --> pending["list packages nuget.org does not hold<br/>(other bytes there: stop)"]
   pending --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]
   login --> recheck["recheck (same checks as authorize)"]
-  recheck --> push["dotnet nuget push, primaries then symbols,<br/>in dependency order"]
+  recheck --> push["dotnet nuget push in dependency order:<br/>pending primaries with --no-symbols,<br/>then every symbol package, --skip-duplicate"]
   push --> readback{"signed packages and Portable PDBs<br/>served within one hour?"}
   readback -- "no: end without failure" --> rerun(["re-run the job later"])
   readback -- yes --> consumer["restore every package from nuget.org only;<br/>payload equals the candidate"]
@@ -337,7 +339,8 @@ flowchart LR
   build["product build"] --> pa[("packages artifact")] --> cand["Candidate"]
   tests["product tests"] --> trx[("TRX artifacts")] --> qual["Qualification"]
   tests --> cob[("Cobertura artifacts")] --> cov["coverage-gate"]
-  cand --> sa[("release-candidate-sboms-&lt;version&gt;")] --> sbom["SBOM jobs"]
+  cand --> sa[("release-candidate-sboms-&lt;version&gt;<br/>sboms.json")] --> sbom["SBOM jobs"]
+  pa --> sbom
   cand --> draft[("draft release<br/>candidate.json, .nupkg, .snupkg, .spdx.json,<br/>release-notes.md, symbol-probes.json")]
   draft --> pub["Publish"]
   draft --> pretag["pre-tag (local)"]
@@ -381,7 +384,7 @@ flowchart TB
     a3["release-candidate / SBOM (+ actions: read)"]
   end
   subgraph releases["writes or sees draft releases: contents write"]
-    w1["release-preflight<br/>(only to see drafts)"]
+    w1["release-preflight<br/>(only to see drafts) + attestations: read"]
     w2["release-candidate / Candidate<br/>+ id-token, attestations, actions: read"]
     w3["release-publish<br/>+ id-token, attestations,<br/>environment approval, secret NUGET_USER"]
   end
@@ -396,8 +399,8 @@ flowchart TB
   f2["product job or qualification fails"] --> x2["nothing published; re-run the failed jobs<br/>or start a new run"]
   f3["Candidate fails"] --> x3["re-run: stage keeps matching assets,<br/>deletes unfinished ones, uploads the rest;<br/>other bytes in the draft stop the job"]
   f4["SBOM job fails"] --> x4["re-run the failed SBOM jobs; whether they find<br/>the Candidate's artifact of the earlier attempt<br/>is not documented. Otherwise delete the draft<br/>and start a new run"]
-  f5["run cancelled or gone after the draft exists"] --> x5["new run of the same version:<br/>preflight resumes at publication"]
-  f6["publish stops before or during the push"] --> x6["re-run: packages already on nuget.org<br/>with the candidate bytes are skipped"]
+  f5["run cancelled or gone after the draft exists"] --> x5["new run of the same version: preflight resumes<br/>at publication only for a complete draft,<br/>otherwise it stops and names what is missing"]
+  f6["publish stops before or during the push"] --> x6["re-run: primaries already on nuget.org with the<br/>candidate bytes are skipped, every symbol<br/>package is pushed again (409 is a warning)"]
   f7["nuget.org not serving within one hour"] --> x7["job ends without failure, draft stays;<br/>re-run later"]
   f8["one maintenance line fails"] --> x8["coordinator reports it; the other lines<br/>are still dispatched and checked"]
 ```
