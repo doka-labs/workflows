@@ -1,9 +1,12 @@
 """Restrict license exceptions of a dependency review to their exact reviewed NuGet versions.
 
 `actions/dependency-review-action` exempts packages listed in
-`allow-dependencies-licenses` from the license check at every version. This
-check reads the action's complete comparison and fails when an exempt package
-appears at any version other than the reviewed one.
+`allow-dependencies-licenses` from the license check at every version: its
+`purlsMatch` compares only the package type and name, not the version
+(src/purl.ts of v5.0.1). This check reads the action's complete comparison and
+fails when an exempt package appears at any version other than the reviewed one.
+
+https://github.com/actions/dependency-review-action/blob/v5.0.1/src/purl.ts
 """
 
 from __future__ import annotations

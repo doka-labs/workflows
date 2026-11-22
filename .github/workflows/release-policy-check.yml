@@ -1,0 +1,59 @@
+name: Release Policy Check
+
+# Validates the caller's .github/release-policy.json and checks that the
+# toolchain of the checkout fits its release line. On pull requests the line is
+# the base branch, which must be a registered line of the policy on main.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the check job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: The check reads a few files without network access besides one API read; 5 minutes as for the guard.
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release-line tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Validate the release policy and the toolchain
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == pull_request* ]]; then
+            arguments=(--line "refs/heads/$BASE_REF" --pull-request)
+          else
+            arguments=(--line "$GITHUB_REF")
+          fi
+
+          python3 -E -s -m tools.release_lines check --root "$GITHUB_WORKSPACE/repository" "${arguments[@]}"

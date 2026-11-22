@@ -17,7 +17,11 @@ import tempfile
 from pathlib import Path
 
 NUGET_SOURCE = "https://api.nuget.org/v3/index.json"
-EXCLUDED_DIRECTORIES = {"bin", "obj", "artifacts", "node_modules"}
+# WHY: bin, obj and artifacts hold build output and copies of project files, as in the audit of
+# Doka.EntityFrameworkCore.MySql (eng/quality/audit-dependencies.sh prunes exactly these).
+EXCLUDED_DIRECTORIES = {"bin", "obj", "artifacts"}
+# WHY: The value of the SafeMigrations audit (eng/release/maintenance.py, run_audit), where a full restore of
+# 24 projects with fresh advisory data stays well below it.
 RESTORE_TIMEOUT_SECONDS = 1200
 LIST_TIMEOUT_SECONDS = 1200
 
@@ -31,6 +35,7 @@ def source_projects(root: Path) -> list[Path]:
     found = []
     for path in root.rglob("*.csproj"):
         parts = path.relative_to(root).parts[:-1]
+        # WHY: Hidden directories hold no product projects; the workflow checks this tool out into .workflows.
         if any(part in EXCLUDED_DIRECTORIES or part.startswith(".") for part in parts):
             continue
 
@@ -47,14 +52,17 @@ def source_projects(root: Path) -> list[Path]:
 
 def write_audit_solution(path: Path, projects: list[Path]) -> None:
     """Write a solution that lists every project, independent of the repository's own solutions."""
-    # WHY: Repositories keep some projects, such as examples, outside their solution on purpose;
-    # the audit covers every project file regardless.
+    # WHY: Repositories keep some projects outside their solution on purpose; Doka.EntityFrameworkCore.MySql has
+    # 16 example projects that are not in its .slnx but are audited by its own audit.
     entries = "".join(f'  <Project Path="{os.path.relpath(project, path.parent)}" />\n' for project in projects)
     path.write_text(f"<Solution>\n{entries}</Solution>\n", encoding="utf-8")
 
 
 def write_nuget_config(path: Path) -> None:
     """Write a configuration that restores and audits against nuget.org only."""
+    # WHY: Without an explicit auditSources entry NuGet uses the package sources for vulnerability data; a
+    # cleared list keeps a repository's extra feeds out of the audit.
+    # https://learn.microsoft.com/nuget/concepts/auditing-packages
     path.write_text(
         '<?xml version="1.0" encoding="utf-8"?>\n'
         "<configuration>\n"
@@ -84,6 +92,9 @@ def validate_report(report: object, expected: list[Path]) -> int:
     if report.get("sources") != [NUGET_SOURCE]:
         raise AuditError("Audit document does not use nuget.org as its only source.")
 
+    # WHY: A listing can report zero vulnerable packages after it failed to fetch advisory data; it then
+    # reports the failure as a problem. Doka.EntityFrameworkCore.MySql (check-vulnerability-audit.sh) and
+    # SafeMigrations (validate_audit) both reject these fields.
     for key in ("problems", "warnings", "errors"):
         if report.get(key, []) != []:
             raise AuditError(f"Audit document reports {key}; that is not a clean result.")
@@ -102,7 +113,7 @@ def validate_report(report: object, expected: list[Path]) -> int:
                 raise AuditError(f"Audit of {project['path']} reports {key}.")
 
         observed.append(Path(project["path"]).resolve())
-        # WHY: A clean listing omits the framework collection entirely.
+        # WHY: A clean listing omits the framework collection entirely (SafeMigrations validate_audit).
         frameworks = project.get("frameworks", [])
         if not isinstance(frameworks, list):
             raise AuditError(f"Framework inventory of {project['path']} is malformed.")
@@ -156,21 +167,35 @@ def audit(root: Path, output: Path, *, locked_mode: bool, cache_parent: Path) ->
     configuration = output / "NuGet.Config"
     write_nuget_config(configuration)
     with tempfile.TemporaryDirectory(prefix="nuget-audit-http-", dir=cache_parent) as cache:
-        # WHY: NuGet HTTP-cache file names contain ':', which artifact uploads reject.
+        # WHY: NuGet HTTP-cache file names contain ':', which artifact uploads reject. That failed the audits of
+        # MySql, SafeMigrations and NestedSet in October 2026 (for example NestedSet run 41192512161: "The path for
+        # one of the files in artifact is not valid: /http-cache/...$ps:_api.nuget.org_v3_index.json/...").
+        # https://github.com/actions/toolkit/blob/main/packages/artifact/src/internal/upload/path-and-artifact-name-validation.ts
         require_outside(Path(cache), output)
         environment = {**os.environ, "NUGET_HTTP_CACHE_PATH": cache}
-        restore = ["dotnet", "restore", str(solution), "--force", "--no-http-cache", "--disable-build-servers",
+        # WHY: --force and --no-http-cache fetch fresh vulnerability data instead of trusting an earlier restore.
+        # NuGetAuditMode=all includes transitive packages (the default only from net10.0 on) and NuGetAuditLevel=low
+        # reports every severity. TreatWarningsAsErrors with empty NoWarn and WarningsNotAsErrors makes NU1901-NU1904
+        # (vulnerable package) and NU1900/NU1905 (vulnerability data unavailable) fatal, so a failed advisory lookup
+        # cannot pass as a clean audit. DokaAuditPipeline=true is the switch NestedSet's Directory.Build.props uses
+        # to turn its audit codes into errors; other repositories ignore the property.
+        # https://learn.microsoft.com/nuget/concepts/auditing-packages
+        restore = ["dotnet", "restore", str(solution), "--force", "--no-http-cache",
                    "--configfile", str(configuration),
                    "-p:NuGetAudit=true", "-p:NuGetAuditMode=all", "-p:NuGetAuditLevel=low",
                    "-p:DokaAuditPipeline=true", "-p:TreatWarningsAsErrors=true", "-p:NoWarn=",
                    "-p:WarningsNotAsErrors="]
         if locked_mode:
+            # WHY: The audit must see the committed dependency graph, not a newly resolved one.
             restore.append("--locked-mode")
 
         if run(restore, cwd=root, environment=environment, stdout=output / "restore.log",
                stderr=output / "restore.err.log", timeout=RESTORE_TIMEOUT_SECONDS):
             raise AuditError("Audited restore failed; see restore.log and restore.err.log.")
 
+        # WHY: --no-restore keeps the audited restore above; from .NET 10 on the command restores by itself
+        # otherwise. --output-version 1 is the only allowed JSON version.
+        # https://learn.microsoft.com/dotnet/core/tools/dotnet-package-list
         listing = ["dotnet", "package", "list", "--project", str(solution), "--no-restore", "--vulnerable",
                    "--include-transitive", "--format", "json", "--output-version", "1",
                    "--config", str(configuration)]
@@ -178,6 +203,7 @@ def audit(root: Path, output: Path, *, locked_mode: bool, cache_parent: Path) ->
                stderr=output / "audit.log", timeout=LIST_TIMEOUT_SECONDS):
             raise AuditError("Vulnerability listing failed; see audit.log.")
 
+        # WHY: SafeMigrations rejects any listing diagnostics; a warning there means the result is incomplete.
         if (output / "audit.log").read_text(encoding="utf-8").strip():
             raise AuditError("Vulnerability listing wrote diagnostics; see audit.log.")
 

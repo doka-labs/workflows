@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "revision": "2026-11-22.1",
+  "repository": "doka-labs/Example",
+  "authorityRef": "refs/heads/main",
+  "release": {
+    "workflowPath": ".github/workflows/release-candidate.yml",
+    "environment": "nuget"
+  },
+  "toolchain": {
+    "frameworkPackages": ["Microsoft.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.*"],
+    "majorCeilingPackages": ["System.Security.Cryptography.Pkcs"],
+    "coherentGroups": [["Microsoft.EntityFrameworkCore", "Microsoft.EntityFrameworkCore.*"]],
+    "lockfiles": ["src/*/packages.lock.json"],
+    "expectedLockfiles": 2,
+    "versionPrefix": "src/Directory.Build.props",
+    "coupling": "coupled"
+  },
+  "lines": [
+    {
+      "sourceRef": "refs/heads/main",
+      "role": "main",
+      "packageMajor": 11,
+      "channel": "stable-and-prerelease",
+      "upstreamStage": "ga",
+      "state": "active"
+    },
+    {
+      "sourceRef": "refs/heads/maintenance/10.x",
+      "role": "maintenance",
+      "packageMajor": 10,
+      "channel": "stable-and-prerelease",
+      "upstreamStage": "ga",
+      "state": "active"
+    }
+  ],
+  "workloads": [
+    {
+      "id": "audit",
+      "workflow": ".github/workflows/dependency-audit.yml",
+      "requiredJobs": ["dependency-audit / Audit"],
+      "timeoutMinutes": 60
+    }
+  ],
+  "qualification": {
+    "gates": [
+      {
+        "name": "repository-qualification",
+        "kind": "protected-check",
+        "workflow": ".github/workflows/ci.yml"
+      }
+    ],
+    "testResults": {
+      "skips": [
+        {
+          "project": "Doka.Example.FunctionalTests"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,74 @@
+name: Release Lines Coordinator
+
+# Dispatches one workload of the caller's release policy on every active line
+# besides main and verifies each dispatched run. Call it from a scheduled
+# workflow on main.
+
+on:
+  workflow_call:
+    inputs:
+      workload:
+        description: Workload id from .github/release-policy.json.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label for the coordinator job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+      retention-days:
+        description: Retention of the artifact in days; 0 uses the repository's retention setting.
+        type: number
+        # WHY: 0 means "using default retention", so the organization or repository setting decides in one place;
+        # a fixed value above that setting is cut down with a warning on every upload (MySql PR #126).
+        # https://github.com/actions/upload-artifact/blob/v7.0.2/action.yml
+        default: 0
+
+permissions:
+  contents: read
+
+jobs:
+  coordinate:
+    name: Coordinate
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: GitHub-hosted jobs end after 6 hours; workload budgets are capped at 330 minutes.
+    timeout-minutes: 360
+    # WHY: Runs of one workload wait in order (up to 100) instead of cancelling each other; queue: max cannot be
+    # combined with cancel-in-progress: true.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency
+    concurrency:
+      group: release-lines-${{ github.repository }}-${{ inputs.workload }}
+      cancel-in-progress: false
+      queue: max
+
+    steps:
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release-line tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Dispatch and verify the workload on every active line
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKLOAD: ${{ inputs.workload }}
+        run: python3 -E -s -m tools.release_lines coordinate --workload "$WORKLOAD" --output "$RUNNER_TEMP/release-lines/report.json"
+
+      - name: Retain the coordination report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-lines-${{ inputs.workload }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-lines/report.json
+          if-no-files-found: warn
+          retention-days: ${{ inputs.retention-days }}

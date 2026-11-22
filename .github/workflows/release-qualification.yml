@@ -1,0 +1,115 @@
+name: Release Qualification
+
+# Qualifies a release candidate in the release run: the line and version fit
+# the release policy on main, the commit's tree carries a pull request
+# qualification, the candidate's own gate jobs succeeded in this run, and the
+# test results of every test project are complete. It attests the frozen line
+# snapshot and the qualification for the commit's tree.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Candidate package version.
+        type: string
+        required: true
+      qualification-only:
+        description: Qualify without permitting publication, for example on a prepared line.
+        type: boolean
+        default: false
+      test-results-pattern:
+        description: Name pattern of this run's artifacts that hold the TRX test results.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label for the qualification job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+    outputs:
+      tree:
+        description: Git tree ID of the qualified commit.
+        value: ${{ jobs.qualify.outputs.tree }}
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Qualify
+    # WHY: actions read lists this run's jobs and downloads its artifacts; id-token and attestations sign.
+    # https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A restore of all projects plus one MSBuild evaluation per project; the audit's 45 minutes cover the
+    # same restore.
+    timeout-minutes: 45
+    outputs:
+      tree: ${{ steps.qualify.outputs.tree }}
+
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release-line tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: repository/global.json
+
+      # WHY: IsTestProject is set by the test SDK packages, so MSBuild evaluates it only after a restore.
+      - name: Restore the committed dependency graph
+        working-directory: repository
+        run: |
+          find . -name '*.csproj' -not -path '*/bin/*' -not -path '*/obj/*' -not -path '*/artifacts/*' -not -path './.*' -print0 |
+            xargs -0 -n 1 dotnet restore --locked-mode
+
+      - name: Download this run's test results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: ${{ inputs.test-results-pattern }}
+          path: ${{ runner.temp }}/test-results
+
+      - name: Qualify the candidate
+        id: qualify
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          QUALIFICATION_ONLY: ${{ inputs.qualification-only }}
+        run: >-
+          python3 -E -s -m tools.release_lines qualify --root "$GITHUB_WORKSPACE/repository"
+          --version "$VERSION" --qualification-only "$QUALIFICATION_ONLY"
+          --trx "$RUNNER_TEMP/test-results" --output "$RUNNER_TEMP/qualification"
+
+      - name: Attest the release-line snapshot
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.qualify.outputs.subject }}
+          predicate-type: https://github.com/doka-labs/workflows/blob/main/docs/predicates/release-line-snapshot-v1.md
+          predicate-path: ${{ runner.temp }}/qualification/snapshot.json
+
+      - name: Attest the release qualification
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.qualify.outputs.subject }}
+          predicate-type: https://github.com/doka-labs/workflows/blob/main/docs/predicates/release-qualification-v1.md
+          predicate-path: ${{ runner.temp }}/qualification/qualification.json

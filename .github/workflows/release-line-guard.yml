@@ -1,0 +1,69 @@
+name: Release Line Guard
+
+# First job of every workload workflow. A run dispatched by the coordinator
+# must prove its origin; a scheduled run on main proceeds only while main is an
+# active line; every other run proceeds unrestricted.
+
+on:
+  workflow_call:
+    inputs:
+      maintenance:
+        description: The run was dispatched by the release-lines coordinator.
+        type: boolean
+        default: false
+      schedule-correlation:
+        description: Coordinator correlation, schedule-<run>-<attempt>.
+        type: string
+        default: ""
+      schedule-source-sha:
+        description: Commit the coordinator resolved for this line.
+        type: string
+        default: ""
+      runs-on:
+        description: Runner label for the guard job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+    outputs:
+      proceed:
+        description: Whether the workload jobs may run.
+        value: ${{ jobs.guard.outputs.proceed }}
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: Guard
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: The guard job limit of SafeMigrations and NestedSet.
+    timeout-minutes: 5
+    outputs:
+      proceed: ${{ steps.decide.outputs.proceed }}
+
+    steps:
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release-line tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Decide whether the workload may run
+        id: decide
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE: ${{ inputs.maintenance }}
+          CORRELATION: ${{ inputs.schedule-correlation }}
+          SOURCE_SHA: ${{ inputs.schedule-source-sha }}
+        run: >-
+          python3 -E -s -m tools.release_lines guard --maintenance "$MAINTENANCE"
+          --correlation "$CORRELATION" --source-sha "$SOURCE_SHA"

@@ -1,9 +1,19 @@
-# WHY: actionlint 1.7.12 does not know the documented job.workflow_repository and
-# job.workflow_sha context properties; upstream closed the request as not planned.
-# Only that exact false positive is ignored, nothing else in the expression rule.
+# WHY: actionlint 1.7.12 predates three documented GitHub Actions features. Each
+# entry accepts exactly one of them without disabling the rule it belongs to:
+# - the GitHub-hosted runner label ubuntu-26.04 (declared as a known label; this
+#   config does not select or create a self-hosted runner),
+# - the job.workflow_repository and job.workflow_sha context properties
+#   (upstream closed the request as not planned),
+# - the concurrency "queue" key.
+# Remove an entry when the pinned actionlint recognizes the feature itself.
+# https://github.com/actions/runner-images/issues/14747
 # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
 # https://github.com/rhysd/actionlint/issues/757
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
 paths:
   .github/workflows/**/*.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
+      - 'unexpected key "queue" for "concurrency" section'

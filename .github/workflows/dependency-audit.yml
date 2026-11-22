@@ -10,15 +10,20 @@ on:
       runs-on:
         description: Runner label for the audit job.
         type: string
-        default: ubuntu-24.04
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
       locked-mode:
         description: Restore with --locked-mode against the committed lock files.
         type: boolean
         default: true
       retention-days:
-        description: Retention of the audit evidence artifact in days.
+        description: Retention of the artifact in days; 0 uses the repository's retention setting.
         type: number
-        default: 14
+        # WHY: 0 means "using default retention", so the organization or repository setting decides in one place;
+        # a fixed value above that setting is cut down with a warning on every upload (MySql PR #126).
+        # https://github.com/actions/upload-artifact/blob/v7.0.2/action.yml
+        default: 0
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ inputs.runs-on }}
+    # WHY: The audit job limit of MySql, SafeMigrations and NestedSet.
     timeout-minutes: 45
 
     steps:

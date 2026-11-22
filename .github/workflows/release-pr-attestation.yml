@@ -1,0 +1,68 @@
+name: Release PR Attestation
+
+# Last job of a repository's pull request CI. When the policy's protected-check
+# gate jobs of this run succeeded, it attests the tested merge tree, so a
+# release of a commit with that tree can rely on this run without re-running
+# its tests and without an artifact that expires.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the attestation job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    name: Attest
+    # WHY: id-token and attestations write the signed attestation; actions read lists this run's jobs. Pull
+    # requests from forks get read-only tokens and cannot attest; Dependabot pull requests get read-only tokens
+    # by default, and "you can use the permissions key in your workflow to increase the access for the token".
+    # https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
+    # https://docs.github.com/en/code-security/dependabot/troubleshooting-dependabot/troubleshooting-dependabot-on-github-actions
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: Two checkouts, a few API reads and one signing; 10 minutes as for the dependency review.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the tested merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
+      # puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the release-line tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Require the gate jobs and prepare the attestation
+        id: prepare
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -E -s -m tools.release_lines pr-qualification --root "$GITHUB_WORKSPACE/repository" --output "$RUNNER_TEMP/pr-qualification"
+
+      - name: Attest the tested merge tree
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.prepare.outputs.subject }}
+          predicate-type: https://github.com/doka-labs/workflows/blob/main/docs/predicates/pr-qualification-v1.md
+          predicate-path: ${{ steps.prepare.outputs.predicate }}
