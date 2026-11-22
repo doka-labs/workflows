@@ -8,8 +8,9 @@ import os
 import sys
 from pathlib import Path
 
+from tools.dependency_audit.audit import AuditError
 from tools.release_lines import attestation, coordinator, dependabot, guard, policy, qualification, toolchain
-from tools.release_lines.github import GitHub, GitHubError
+from tools.release_lines.github import GitHub, GitHubError, PacedGitHub
 
 
 TEMPLATE_PATH = ".github/dependabot-template.yml"
@@ -57,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     pr = commands.add_parser("pr-qualification", help="Write the subject and predicate of a PR qualification.")
     pr.add_argument("--root", type=Path, required=True)
     pr.add_argument("--output", type=Path, required=True)
+    restore = commands.add_parser("restore-qualification", help="Restore the locked graph for release qualification.")
+    restore.add_argument("--root", type=Path, required=True)
     qualify = commands.add_parser("qualify", help="Qualify a release candidate and write its predicates.")
     qualify.add_argument("--root", type=Path, required=True)
     qualify.add_argument("--version", required=True)
@@ -111,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Pull request qualification prepared for tree {tree}.")
             return 0
 
+        if args.command == "restore-qualification":
+            qualification.restore_projects(args.root.resolve())
+            return 0
+
         if args.command == "qualify":
             summary = qualification.qualify(GitHub(), environment, args.root.resolve(), version=args.version,
                                             qualification_only=args.qualification_only == "true",
@@ -121,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "coordinate":
-            report = coordinator.coordinate(GitHub(), environment, args.workload, args.output)
+            paced = PacedGitHub(GitHub(), requests_per_hour=coordinator.REQUESTS_PER_HOUR)
+            report = coordinator.coordinate(paced, environment, args.workload, args.output)
             print(json.dumps(report, indent=2, sort_keys=True))
             if report["conclusion"] != "success":
                 print("::error::At least one release line failed its workload; see the report.", file=sys.stderr)
@@ -135,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Workload run proceeds." if allowed else "Main is not an active line; the scheduled run is skipped.")
         return 0
     except (policy.PolicyError, toolchain.ToolchainError, dependabot.DependabotError, qualification.QualificationError,
-            GitHubError) as error:
+            AuditError, GitHubError) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
 

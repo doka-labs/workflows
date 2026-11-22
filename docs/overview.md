@@ -222,7 +222,7 @@ sequenceDiagram
   S->>C: workload id
   C->>API: head of protected main, release policy at that commit (Git blob checked)
   C->>C: require run on current head of main, workload declared
-  loop every active line besides main, all at once, all polls together at most 480 per hour
+  loop every active line besides main, child runs parallel, REST calls serial and capped at 480 per rolling hour
     C->>API: head of the protected line
     C->>API: workflow_dispatch(maintenance, schedule-correlation, schedule-source-sha)
     API-->>C: workflow_run_id
@@ -318,16 +318,16 @@ observed, never replaced.
 
 ```mermaid
 flowchart TB
-  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, release qualification for the tree,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
+  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
   auth --> adm[("attest release-admission-v1")]
   adm --> pending["list packages nuget.org does not hold<br/>(other bytes there: stop)"]
   pending --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]
-  login --> recheck["recheck (same checks as authorize)"]
+  login --> recheck["recheck authorization, Latest and live draft assets"]
   recheck --> push["dotnet nuget push in dependency order:<br/>pending primaries with --no-symbols,<br/>then every symbol package, --skip-duplicate"]
   push --> readback{"signed packages and Portable PDBs<br/>served within one hour?"}
   readback -- "no: end without failure" --> rerun(["re-run the job later"])
   readback -- yes --> consumer["restore every package from nuget.org only;<br/>payload equals the candidate"]
-  consumer --> recheck2["recheck"]
+  consumer --> recheck2["recheck authorization"]
   recheck2 --> cur["Latest decided, then the current draft<br/>assets equal the candidate"]
   cur --> rel["publish the draft by numeric ID,<br/>make_latest only for a strictly newer stable version"]
   rel --> verify["release immutable, gh release verify,<br/>gh release verify-asset for every asset,<br/>whole asset inventory equals the candidate,<br/>Latest confirmed"]

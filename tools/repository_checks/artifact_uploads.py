@@ -17,7 +17,9 @@ from pathlib import Path
 
 TEXT_EXTENSIONS = frozenset((".json", ".log", ".trx", ".txt", ".sql", ".md", ".xml", ".csv", ".sarif"))
 GLOB_CHARACTERS = re.compile(r"[*?\[\]]")
-UPLOAD = re.compile(r"^(?P<indent> *)(?:- )?uses: [\"']?actions/upload-artifact@", re.MULTILINE)
+# WHY: YAML permits multiple spaces and tabs between a key's colon and its value, outside indentation.
+# https://yaml.org/spec/1.2.2/#62-separation-spaces
+UPLOAD = re.compile(r"^(?P<indent> *)(?:- )?uses:[ \t]+[\"']?actions/upload-artifact@", re.MULTILINE)
 
 
 class UploadError(RuntimeError):

@@ -127,10 +127,13 @@ def main(argv: list[str] | None = None) -> int:
                                              output=args.output.resolve())
             publication.write_sbom_handoff(manifest, args.output.resolve(), args.handoff.resolve())
             _output("packages", json.dumps([item["id"] for item in manifest["packages"]]))
-            _summary(f"## Release candidate {manifest['version']}\n\nCheck locally with `python3 -E -s -m "
-                     f"tools.release_publication pre-tag --version {manifest['version']}`, tag the qualified commit "
-                     f"with an SSH-signed annotated tag, push the tag to origin, then approve the publication:"
-                     f"\n\n```sh\ngit tag -s {manifest['tag']} {manifest['commit']} -m \"{manifest['tag']}\"\n```\n")
+            # WHY: Python -m imports from the current directory, while pre-tag must inspect the product checkout.
+            # https://docs.python.org/3/using/cmdline.html#cmdoption-m
+            _summary(f"## Release candidate {manifest['version']}\n\nFrom the workflows checkout, run:\n\n"
+                     f"```sh\npython3 -E -s -m tools.release_publication pre-tag "
+                     f"--root /path/to/product-checkout --version {manifest['version']}\n```\n\n"
+                     "Run the tag command printed by pre-tag in the product checkout, push the tag to origin, "
+                     "then approve the publication.\n")
             return 0
 
         if args.command == "sbom-extract":
@@ -150,7 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "recheck":
-            manifest = publication.authorize(api, environment, args.root.resolve(), args.candidate.resolve())
+            directory = args.candidate.resolve()
+            manifest = publication.authorize(api, environment, args.root.resolve(), directory)
+            publication.check_publish_target(api, environment["GITHUB_REPOSITORY"], manifest, directory)
             print(f"Rechecked {manifest['tag']} before the next write.")
             return 0
 

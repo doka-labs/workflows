@@ -113,6 +113,24 @@ def pr_predicate(api, policy: dict, environment: dict, event: dict, root: Path) 
                   "workflow": path, "gates": gates}
 
 
+def restore_projects(root: Path) -> None:
+    """Restore the locked dependency graph of the projects used for qualification."""
+    # WHY: Restore must use the same inventory as MSBuild property evaluation. A separate shell scan restored
+    # projects in nested hidden directories even though the evaluation excludes them. Locked mode prevents changes
+    # to the lockfile. NuGetAudit stays disabled here because dependency audit and review are separate checks.
+    # https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-restore
+    # https://learn.microsoft.com/en-us/nuget/concepts/auditing-packages
+    for project in source_projects(root):
+        command = ["dotnet", "restore", str(project), "--locked-mode", "-p:NuGetAudit=false"]
+        try:
+            completed = subprocess.run(command, cwd=root, check=False)
+        except OSError as error:
+            raise QualificationError(f"Cannot start restore of {project.relative_to(root)}.") from error
+
+        if completed.returncode:
+            raise QualificationError(f"Cannot restore {project.relative_to(root)} in locked mode.")
+
+
 def test_projects(root: Path) -> dict[str, str]:
     """Return the test projects of a restored checkout as assembly name to relative project path."""
     # WHY: Whether a project is a test project is decided by MSBuild evaluation (IsTestProject=true, set for example

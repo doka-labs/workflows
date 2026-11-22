@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 from tools.release_lines import coordinator, guard
-from tools.release_lines.github import GitHubError
+from tools.release_lines.github import GitHubError, PacedGitHub
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "examples" / "release-policy.json"
 REPOSITORY = "doka-labs/Example"
@@ -48,7 +48,7 @@ class FakeApi:
         self.routes = {key: list(value) if isinstance(value, list) else [value] for key, value in routes.items()}
         self.calls = []
 
-    def request(self, route, method="GET", payload=None):
+    def request(self, route, method="GET", payload=None, **options):
         self.calls.append((method, route, payload))
         responses = self.routes.get((method, route.split("?", 1)[0]))
         if not responses:
@@ -102,12 +102,14 @@ def wait(api, clock=None):
 
 class CoordinateTests(unittest.TestCase):
     def coordinate(self, api, env=None):
+        clock = FakeClock()
+        paced = PacedGitHub(api, requests_per_hour=coordinator.REQUESTS_PER_HOUR, clock=clock, sleep=clock.sleep)
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "report.json"
             try:
-                result = coordinator.coordinate(api, env or environment(), "audit", output,
+                result = coordinator.coordinate(paced, env or environment(), "audit", output,
                                                 dispatch=lambda *args, **kwargs: coordinator.dispatch_line(
-                                                    *args, **kwargs, wait=lambda *a, **k: wait(a[0])))
+                                                    *args, **kwargs, wait=lambda *a, **k: wait(a[0], clock)))
             finally:
                 saved = json.loads(output.read_text(encoding="ascii"))
 
@@ -448,7 +450,9 @@ class ConcurrencyTests(unittest.TestCase):
         # Arrange
         import threading
 
-        api = FakeApi(base_routes(raw=policy_bytes(self.five_lines)))
+        clock = FakeClock()
+        api = PacedGitHub(FakeApi(base_routes(raw=policy_bytes(self.five_lines))), requests_per_hour=480,
+                          clock=clock, sleep=clock.sleep)
         barrier = threading.Barrier(5, timeout=10)
         intervals = []
 
@@ -464,7 +468,7 @@ class ConcurrencyTests(unittest.TestCase):
 
         # Assert
         self.assertEqual("success", result["conclusion"])
-        self.assertEqual([37.5] * 5, intervals)
+        self.assertEqual([50.0] * 5, intervals)
 
 
 class GitHubTimeoutTests(unittest.TestCase):
@@ -483,6 +487,151 @@ class GitHubTimeoutTests(unittest.TestCase):
         # Assert
         self.assertEqual("github_timeout", raised.exception.code)
         self.assertNotIn("x=1", str(raised.exception))
+
+
+class RequestPacingTests(unittest.TestCase):
+    def test_shared_budget_covers_every_request(self):
+        # Arrange
+        route = "repos/example/project/actions/runs/1"
+        fake = FakeApi({("GET", route): {}})
+        clock = FakeClock()
+        client = PacedGitHub(fake, requests_per_hour=2, clock=clock, sleep=clock.sleep)
+
+        # Act
+        client.request(route)
+        client.request(route)
+        with self.assertRaises(GitHubError) as raised:
+            client.request(route, deadline=300)
+
+        # Assert
+        self.assertEqual("github_deadline", raised.exception.code)
+        self.assertEqual(2, len(fake.calls))
+
+    def test_throttled_dispatch_is_not_retried_and_delays_other_reads(self):
+        # Arrange
+        route = "repos/example/project/actions/workflows/audit.yml/dispatches"
+        fake = FakeApi({("POST", route): GitHubError(
+            "rate limited", code="github_http_error", http_status=429, retry_after=20),
+            ("GET", route): {"ok": True}})
+        clock = FakeClock()
+        client = PacedGitHub(fake, requests_per_hour=480, clock=clock, sleep=clock.sleep)
+
+        # Act
+        with self.assertRaises(GitHubError):
+            client.request(route, "POST", {"ref": "main"})
+        result = client.request(route)
+
+        # Assert
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(["POST", "GET"], [method for method, _, _ in fake.calls])
+        self.assertEqual(20, clock.now)
+
+    def test_get_uses_both_retry_headers_and_retains_the_phase_budget(self):
+        # Arrange
+        route = "repos/example/project/actions/runs/1"
+        clock = FakeClock()
+        throttled = GitHubError("rate limited", code="github_http_error", http_status=403,
+                                retry_after=20, rate_reset=1030)
+        fake = FakeApi({("GET", route): [throttled, {"ok": True}]})
+        client = PacedGitHub(fake, requests_per_hour=480, clock=clock, sleep=clock.sleep,
+                            wall_clock=lambda: 1000 + clock.now)
+
+        # Act
+        with self.assertRaises(GitHubError) as raised:
+            client.request(route, deadline=29)
+        result = client.request(route, deadline=31)
+
+        # Assert
+        self.assertEqual("github_deadline", raised.exception.code)
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(30, clock.now)
+        self.assertEqual(2, len(fake.calls))
+
+    def test_headerless_secondary_limit_retries_reads_with_exponential_backoff(self):
+        # Arrange
+        route = "repos/example/project/actions/runs/1"
+        throttled = GitHubError("rate limited", code="github_http_error", http_status=429)
+        fake = FakeApi({("GET", route): [throttled, throttled, {"ok": True}]})
+        clock = FakeClock()
+        client = PacedGitHub(fake, requests_per_hour=480, clock=clock, sleep=clock.sleep)
+
+        # Act
+        result = client.request(route)
+
+        # Assert
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual(180, clock.now)
+        self.assertEqual(3, len(fake.calls))
+
+    def test_transport_reads_case_insensitive_rate_headers(self):
+        # Arrange
+        import subprocess
+        from unittest import mock
+
+        from tools.release_lines.github import GitHub
+
+        route = "repos/example/project/actions/runs/1"
+        responses = [
+            subprocess.CompletedProcess(["gh"], 1, stdout=(
+                'HTTP/2 403\nRetry-After: 20\nX-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1030\n\n'
+                '{"message":"API rate limit exceeded"}'), stderr=""),
+            subprocess.CompletedProcess(["gh"], 0, stdout=(
+                'HTTP/2 200\nx-ratelimit-remaining: 0\nx-ratelimit-reset: 1060\n\n{"ok":true}'), stderr=""),
+        ]
+        clock = FakeClock()
+        client = PacedGitHub(GitHub(), requests_per_hour=480, clock=clock, sleep=clock.sleep,
+                            wall_clock=lambda: 1000 + clock.now)
+
+        # Act
+        with mock.patch("subprocess.run", side_effect=responses) as invoked:
+            result = client.request(route, deadline=40)
+            with self.assertRaises(GitHubError) as raised:
+                client.request(route, deadline=59)
+
+        # Assert
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual("github_deadline", raised.exception.code)
+        self.assertEqual([40, 10], [call.kwargs["timeout"] for call in invoked.call_args_list])
+
+    def test_simultaneous_reads_keep_only_one_request_in_flight(self):
+        # Arrange
+        import concurrent.futures
+        import threading
+
+        clock = FakeClock()
+        first_entered = threading.Event()
+        second_started = threading.Event()
+        finish_first = threading.Event()
+
+        class Transport:
+            def request(self, route, method, payload, **options):
+                if route == "first":
+                    first_entered.set()
+                    if not finish_first.wait(5):
+                        raise AssertionError("The test did not release the first request.")
+                elif not finish_first.is_set():
+                    raise AssertionError("The second request ran while the first was in flight.")
+                return route
+
+        client = PacedGitHub(Transport(), requests_per_hour=480, clock=clock, sleep=clock.sleep)
+
+        def second_request():
+            second_started.set()
+            return client.request("second")
+
+        # Act
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(client.request, "first")
+            entered = first_entered.wait(5)
+            second = executor.submit(second_request)
+            started = second_started.wait(5)
+            finish_first.set()
+            results = (first.result(5), second.result(5))
+
+        # Assert
+        self.assertEqual((True, True), (entered, started))
+        self.assertEqual(("first", "second"), results)
+        self.assertEqual(1, clock.now)
 
 
 class ScaledPollTests(unittest.TestCase):

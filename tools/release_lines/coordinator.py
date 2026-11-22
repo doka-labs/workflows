@@ -34,10 +34,12 @@ VISIBILITY_SECONDS = 300
 RESULT_SECONDS = 120
 # WHY: The polling interval of the MySql and SafeMigrations coordinators.
 POLL_SECONDS = 15
-# WHY: "The rate limit for GITHUB_TOKEN is 1,000 requests per hour per repository"; the polls of all lines together
-# stay at 480 per hour, half of it, so job listings and other runs of the repository keep their share.
-# https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
-POLLS_PER_HOUR = 480
+# WHY: "The rate limit for GITHUB_TOKEN is 1,000 requests per hour per repository", shared by every run of the
+# repository. The coordinator's whole request stream stays at 480 per hour, and its polls at 360, so startup,
+# dispatches and job listings fit inside its own cap.
+# https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#primary-rate-limit-for-github_token-in-github-actions
+REQUESTS_PER_HOUR = 480
+POLLS_PER_HOUR = 360
 PRE_EXECUTION = ("queued", "pending", "requested", "waiting")
 STATES = (*PRE_EXECUTION, "in_progress", "completed")
 CONCLUSIONS = (None, "success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required",
@@ -136,14 +138,15 @@ def require_coordinator_identity(authority: dict, environment: dict) -> None:
                           code="authority_mismatch")
 
 
-def verify_jobs(api, repository: str, run_id: int, required: list[str]) -> None:
+def verify_jobs(api, repository: str, run_id: int, required: list[str], *, deadline: float | None = None) -> None:
     """Require every declared job to be present and successful and no job to fail, cancel or time out."""
     jobs, seen, total = [], set(), None
     # WHY: filter=latest lists the jobs of the latest attempt, so a successful re-run counts and an earlier failed
     # attempt does not; per_page is at most 100. The page and total bounds are SafeMigrations'.
     # https://docs.github.com/en/rest/actions/workflow-jobs#list-jobs-for-a-workflow-run
     for page in range(1, 102):
-        response = api.request(f"repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}")
+        route = f"repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100&page={page}"
+        response = api.request(route, deadline=deadline)
         entries = response.get("jobs") if isinstance(response, dict) else None
         count = response.get("total_count") if isinstance(response, dict) else None
         if (type(count) is not int or not 0 < count <= 10000 or not isinstance(entries, list) or len(entries) > 100
@@ -233,8 +236,9 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
         sleep(min(interval, max(0.0, until - clock())))
 
     while True:
+        phase_deadline = result_deadline or (deadline if initialized else visibility_deadline)
         try:
-            run = api.request(f"repos/{repository}/actions/runs/{run_id}")
+            run = api.request(f"repos/{repository}/actions/runs/{run_id}", deadline=phase_deadline)
         except GitHubError as error:
             # WHY: A freshly dispatched run can return 404 for a short time after dispatch (NestedSet PR #32).
             if initialized or error.code != "github_http_error" or error.http_status != 404:
@@ -297,7 +301,7 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
             continue
 
         if status == "completed":
-            verify_jobs(api, repository, run_id, workload["requiredJobs"])
+            verify_jobs(api, repository, run_id, workload["requiredJobs"], deadline=deadline)
 
             return {"sourceRef": source_ref, "sourceCommit": commit, "runId": run_id, "conclusion": "success",
                     "verificationStatus": "success"}
@@ -335,7 +339,10 @@ def persist_report(path: Path, report: dict) -> None:
 
 
 def coordinate(api, environment: dict, workload_id: str, output: Path, *, dispatch=dispatch_line) -> dict:
-    """Dispatch a workload on all active lines besides main and collect every outcome independently."""
+    """Dispatch a workload on all active lines besides main and collect every outcome independently.
+
+    The api is a PacedGitHub, so every line's requests share one budget and honor GitHub's rate-limit headers.
+    """
     repository = environment.get("GITHUB_REPOSITORY", "")
     report = {"schemaVersion": 1, "workload": workload_id, "conclusion": "in_progress", "children": []}
     persist_report(output, report)

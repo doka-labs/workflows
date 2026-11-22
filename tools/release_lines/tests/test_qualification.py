@@ -1,8 +1,10 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.release_lines import attestation, qualification
+from tools.release_lines.__main__ import main
 from tools.release_lines.github import GitHubError
 
 NAMESPACE = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"
@@ -190,6 +192,29 @@ class TestResultTests(unittest.TestCase):
 
         # Assert
         self.assertIn("No TRX", message)
+
+
+class RestoreQualificationTests(unittest.TestCase):
+    def test_restore_uses_the_same_project_inventory_as_qualification(self):
+        # Arrange
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "src" / "Test Project.csproj"
+            fixture = project.parent / ".fixtures" / "Fixture.csproj"
+            fixture.parent.mkdir(parents=True)
+            project.touch()
+            fixture.touch()
+
+            # Act
+            with patch.object(qualification.subprocess, "run") as restore:
+                restore.return_value.returncode = 0
+                result = main(["restore-qualification", "--root", str(root)])
+
+            # Assert
+            self.assertEqual(0, result)
+            restore.assert_called_once_with(
+                ["dotnet", "restore", str(project), "--locked-mode", "-p:NuGetAudit=false"],
+                cwd=root, check=False)
 
 
 class PackageValidationTests(unittest.TestCase):

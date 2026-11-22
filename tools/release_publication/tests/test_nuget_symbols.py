@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from uuid import UUID
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOL = ROOT / "tools" / "NuGetSymbols" / "NuGetSymbols.csproj"
@@ -47,6 +48,22 @@ class NuGetSymbolsTests(unittest.TestCase):
                       "--packages", str(packages), "--output", str(output)], ROOT)
         return result, (json.loads(output.read_text(encoding="utf-8")) if result.returncode == 0 else None)
 
+    def rewrite_pdb(self, name, transform):
+        packages = self.work / name
+        packages.mkdir()
+        for source in self.packages.iterdir():
+            target = packages / source.name
+            if source.suffix != ".snupkg":
+                target.write_bytes(source.read_bytes())
+                continue
+
+            with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, "w") as copy:
+                for entry in original.infolist():
+                    data = original.read(entry)
+                    copy.writestr(entry, transform(data) if entry.filename.endswith(".pdb") else data)
+
+        return packages
+
     def test_packed_library_yields_one_probe(self):
         # Arrange
         packages = self.packages
@@ -65,18 +82,7 @@ class NuGetSymbolsTests(unittest.TestCase):
 
     def test_corrupted_pdb_fails(self):
         # Arrange
-        damaged = self.work / "damaged"
-        damaged.mkdir(exist_ok=True)
-        for source in self.packages.iterdir():
-            target = damaged / source.name
-            if source.suffix != ".snupkg":
-                target.write_bytes(source.read_bytes())
-                continue
-
-            with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, "w") as copy:
-                for entry in original.infolist():
-                    data = original.read(entry)
-                    copy.writestr(entry, data[:-1] + bytes([data[-1] ^ 1]) if entry.filename.endswith(".pdb") else data)
+        damaged = self.rewrite_pdb("damaged", lambda data: data[:-1] + bytes([data[-1] ^ 1]))
 
         # Act
         result, _ = self.probe(damaged)
@@ -84,6 +90,29 @@ class NuGetSymbolsTests(unittest.TestCase):
         # Assert
         self.assertEqual(1, result.returncode)
         self.assertIn("does not match the checksum in its assembly", result.stderr)
+
+    def test_pdb_with_same_guid_and_different_stamp_fails(self):
+        # Arrange
+        result, document = self.probe(self.packages)
+        self.assertEqual(0, result.returncode, result.stderr)
+        key = document["probes"][0]["url"].split("/")[-2]
+        guid = UUID(hex=key[:32]).bytes_le
+
+        def change_stamp(data):
+            self.assertEqual(1, data.count(guid))
+            # WHY: The stamp follows the GUID in the PDB ID. The checksum zeros all 20 ID bytes.
+            # https://github.com/dotnet/runtime/blob/main/docs/design/specs/PE-COFF.md#portable-pdb-checksum
+            stamp = data.index(guid) + len(guid)
+            return data[:stamp] + bytes([data[stamp] ^ 1]) + data[stamp + 1:]
+
+        damaged = self.rewrite_pdb("wrong-stamp", change_stamp)
+
+        # Act
+        result, _ = self.probe(damaged)
+
+        # Assert
+        self.assertEqual(1, result.returncode)
+        self.assertIn("does not match the identity in its assembly", result.stderr)
 
     def test_missing_symbol_package_fails(self):
         # Arrange

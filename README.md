@@ -187,6 +187,10 @@ matched as `<job> (...)`; every other job successful or skipped; no job
 failed, cancelled or timed out). A failing line never hides the result of
 another. The report is kept as an artifact.
 
+Child workflows run concurrently. The coordinator serializes its REST calls,
+caps its own requests at 480 per rolling hour, and honors GitHub's backoff
+headers. See [GitHub's REST API limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
 ```yaml
 name: Release Lines
 
@@ -299,11 +303,10 @@ them:
    verifies each Portable PDB against its assembly (`tools/NuGetSymbols`),
    attests build provenance and the SBOMs, and stores the candidate as a draft
    release. The job summary shows the command to tag the commit.
-5. The maintainer checks locally with
-   `python3 -E -s -m tools.release_publication pre-tag --version <version>`
-   (run from a checkout of this repository, in the product checkout or with
-   `--root`): immutable releases enabled (the job token cannot read that
-   setting), clean checkout on the current head of the protected line, tag and
+5. From a checkout of this repository, the maintainer runs
+   `python3 -E -s -m tools.release_publication pre-tag --root /path/to/product-checkout --version <version>`.
+   The command checks that immutable releases are enabled, the product checkout
+   is clean and on the current head of the protected line, the tag and
    version unused, the draft's candidate built from this commit and passing the
    publish job's verification, SSH signing configured with a key listed in
    `.github/allowed_signers`. Then the maintainer creates and pushes the
@@ -311,14 +314,22 @@ them:
    for its version; a broken candidate is deleted before tagging, not after.
 6. `release-publish.yml` in the publisher environment: after approval it
    rechecks the assets against their attestations, the policy on `main`, the
-   environment grants and the signed tag, attests the admission, pushes what
-   nuget.org does not hold yet, reads every package back signed and every
-   Portable PDB from the symbol server, restores every package from nuget.org
-   only in an isolated consumer, compares the current draft with the candidate
+   environment grants and the signed tag, and attests the admission. Before
+   pushing, it checks the existing Latest release and verifies the current
+   draft assets. It pushes what nuget.org does not hold yet, reads every
+   package back signed and every Portable PDB from the symbol server,
+   restores every package from nuget.org only in an isolated consumer,
+   compares the current draft with the candidate
    once more, then publishes the immutable release and requires its whole asset
    inventory to equal the candidate.
    If the readback is still pending after one hour, the job ends without
    failure and re-running it continues.
+
+The job token cannot read whether immutable releases are enabled: the setting
+needs the Administration permission, which a `GITHUB_TOKEN` never has. Enforce
+it for the product repository in the organization settings; `pre-tag` checks it
+with the maintainer's credentials, and the publish job fails when the published
+release is not immutable.
 
 ```yaml
 name: Release Candidate

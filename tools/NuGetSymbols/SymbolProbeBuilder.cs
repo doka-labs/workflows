@@ -120,7 +120,10 @@ internal static class SymbolProbeBuilder
             throw new InvalidDataException($"{assemblyEntry} does not carry a SHA-256 Portable PDB checksum.");
         }
 
-        ValidatePortablePdb(pdb, codeView.Guid, checksum.Checksum.AsSpan(), pdbEntry);
+        // WHY: Portable CodeView identifies its PDB by GUID and debug-directory stamp together.
+        // https://github.com/dotnet/runtime/blob/main/docs/design/specs/PE-COFF.md#codeview-debug-directory-entry-type-2
+        var contentId = new BlobContentId(codeView.Guid, codeViews[0].Stamp);
+        ValidatePortablePdb(pdb, contentId, checksum.Checksum.AsSpan(), pdbEntry);
 
         // WHY: Portable PDB symbol-store keys use the PDB GUID followed by FFFFFFFF in place of an age.
         // https://github.com/dotnet/symstore/blob/main/docs/specs/SSQP_Key_Conventions.md
@@ -132,7 +135,7 @@ internal static class SymbolProbeBuilder
 
     private static void ValidatePortablePdb(
         byte[] pdb,
-        Guid expectedGuid,
+        BlobContentId expectedId,
         ReadOnlySpan<byte> expectedChecksum,
         string pdbEntry
     )
@@ -161,16 +164,17 @@ internal static class SymbolProbeBuilder
                 throw new InvalidDataException($"{pdbEntry} is not a readable Portable PDB.", exception);
             }
 
-            if (header is null || new BlobContentId(header.Id).Guid != expectedGuid)
-            {
-                throw new InvalidDataException($"{pdbEntry} does not match the identity in its assembly.");
-            }
-
             // WHY: The Portable PDB checksum covers the file with its 20-byte PDB ID zeroed.
             // https://github.com/dotnet/runtime/blob/main/docs/design/specs/PE-COFF.md#pdb-checksum-debug-directory-entry-type-19
-            if (header.Id.Length != 20 || header.IdStartOffset < 0 || header.IdStartOffset > pdb.Length - 20)
+            if (header is null || header.Id.Length != 20 || header.IdStartOffset < 0
+                || header.IdStartOffset > pdb.Length - 20)
             {
                 throw new InvalidDataException($"{pdbEntry} has an invalid PDB ID range.");
+            }
+
+            if (new BlobContentId(header.Id) != expectedId)
+            {
+                throw new InvalidDataException($"{pdbEntry} does not match the identity in its assembly.");
             }
 
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);

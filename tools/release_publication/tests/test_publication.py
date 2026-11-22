@@ -435,18 +435,18 @@ class VerifyCandidateTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def fake(self, *, qualification=None, subjects=None, sbom=SBOM):
+    def fake(self, *, qualification=None, subjects=None, sbom=SBOM, origin_attempt=1):
         package = self.manifest["packages"][0]
         subjects = subjects if subjects is not None else {package["nupkg"]: package["nupkgSha256"],
                                                           package["snupkg"]: package["snupkgSha256"]}
         qualification = qualification if qualification is not None else [
             {"predicate": {"commit": COMMIT, "version": "1.2.3", "snapshot": {"qualificationOnly": False}},
-             "runId": 5, "attempt": 1, "subjects": {}}]
+             "runId": 1, "attempt": 1, "subjects": {}}]
 
         def verify(subject, repository, predicate_type, **options):
             self.calls.append((predicate_type, options))
             if predicate_type == attestation.SLSA_PROVENANCE:
-                return [{"predicate": {}, "runId": 1, "attempt": 1, "subjects": subjects}]
+                return [{"predicate": {}, "runId": 1, "attempt": origin_attempt, "subjects": subjects}]
 
             if predicate_type.startswith("https://spdx.dev/"):
                 return [{"predicate": sbom, "runId": 1, "attempt": 1, "subjects": {}}]
@@ -515,7 +515,7 @@ class VerifyCandidateTests(unittest.TestCase):
 
     def test_candidate_without_matching_qualification_fails(self):
         # Arrange
-        fake = self.fake(qualification=[{"predicate": {"commit": "b" * 40, "version": "1.2.3"}, "runId": 5,
+        fake = self.fake(qualification=[{"predicate": {"commit": "b" * 40, "version": "1.2.3"}, "runId": 1,
                                          "attempt": 1, "subjects": {}}])
 
         # Act
@@ -524,6 +524,51 @@ class VerifyCandidateTests(unittest.TestCase):
 
         # Assert
         self.assertIn("No release qualification", str(raised.exception))
+
+    def test_candidate_uses_its_own_run_and_allows_earlier_attempt(self):
+        # Arrange
+        qualification = [
+            {"runId": run, "attempt": attempt, "predicate": {"commit": COMMIT, "version": "1.2.3",
+                                                              "snapshot": {"qualificationOnly": only}}}
+            for run, attempt, only in [(1, 1, False), (2, 1, True), (1, 3, True)]]
+        fake = self.fake(qualification=qualification, origin_attempt=2)
+
+        # Act
+        manifest = publication.verify_candidate(REPOSITORY, self.root, verify=fake)
+
+        # Assert
+        self.assertIs(manifest["qualification"]["snapshot"]["qualificationOnly"], False)
+
+    def test_qualification_only_candidate_is_rejected_during_verification(self):
+        # Arrange
+        qualification = [{"runId": 1, "attempt": 1, "predicate": {"commit": COMMIT, "version": "1.2.3",
+                                                                   "snapshot": {"qualificationOnly": True}}}]
+        fake = self.fake(qualification=qualification)
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.verify_candidate(REPOSITORY, self.root, verify=fake)
+
+        # Assert
+        self.assertIn("qualification-only", str(raised.exception))
+
+    def test_conflicting_symbol_probes_fail_during_candidate_verification(self):
+        # Arrange
+        probes = self.manifest["symbols"]
+        probes.append({**probes[0], "sha256": "different"})
+        path = self.root / publication.PROBES
+        path.write_text(json.dumps({"probes": probes}), encoding="ascii")
+        self.manifest["probesSha256"] = packages.sha256(path)
+        (self.root / publication.CANDIDATE).write_text(json.dumps(self.manifest), encoding="ascii")
+        fake = self.fake()
+
+        # Act
+        with self.assertRaises(nuget.NuGetError) as raised:
+            publication.verify_candidate(REPOSITORY, self.root, verify=fake)
+
+        # Assert
+        self.assertIn("expect different bytes", str(raised.exception))
+        self.assertEqual([], self.calls)
 
     def test_duplicate_manifest_key_fails(self):
         # Arrange
@@ -1151,6 +1196,25 @@ class PublishCurrentDraftTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def test_recheck_blocks_unsupported_latest_without_writing(self):
+        # Arrange
+        from tools.release_publication import __main__ as cli
+
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/latest": {"tag_name": "v1.0.0", "immutable": False}})
+        mock = unittest.mock
+
+        # Act
+        with mock.patch.dict(cli.os.environ, {"GITHUB_REPOSITORY": REPOSITORY}), \
+                mock.patch.object(cli, "GitHub", return_value=api), \
+                mock.patch.object(publication, "authorize", return_value=self.manifest):
+            result = cli.main(["recheck", "--root", str(self.root), "--candidate", str(self.root)])
+
+        # Assert
+        self.assertEqual(1, result)
+        self.assertEqual([("GET", f"repos/{REPOSITORY}/releases?per_page=100&page=1"),
+                          ("GET", f"repos/{REPOSITORY}/releases/latest")], api.calls)
+
     def test_draft_changed_after_verification_is_not_published(self):
         # Arrange
         self.assets[0]["digest"] = "sha256:" + "0" * 64
@@ -1214,8 +1278,6 @@ class PreTagImmutableTests(unittest.TestCase):
 
         # Assert
         self.assertIn("Immutable releases are not enabled", str(raised.exception))
-
-
 class StageWithoutDigestTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()

@@ -17,7 +17,12 @@ self-hosted-runner:
   labels:
     - ubuntu-26.04
 paths:
-  .github/workflows/**/*.yml:
+  # WHY: GitHub accepts both workflow extensions. actionlint matches paths with doublestar, whose brace
+  # alternatives apply the same narrow exceptions to either extension.
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#about-yaml-syntax-for-workflows
+  # https://github.com/rhysd/actionlint/blob/v1.7.12/config.go
+  # https://github.com/bmatcuk/doublestar/blob/v4.10.0/README.md#patterns
+  '.github/workflows/**/*.{yml,yaml}':
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'
       - 'unexpected key "queue" for "concurrency" section'

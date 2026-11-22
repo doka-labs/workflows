@@ -143,19 +143,26 @@ def verify_signature(path: Path, timeout: float) -> None:
         raise NuGetError(f"The signature of {path.name} on nuget.org does not verify.")
 
 
+def validate_symbol_probes(probes: list[dict]) -> None:
+    """Require probes for the same symbol-store URL to agree on the checksum and exact bytes."""
+    # WHY: The Portable PDB symbol-store key uses the GUID, and the PE checksum excludes the PDB ID. Readback
+    # counts one response per URL, so all probes for that URL must agree on both checksum and full-file hash.
+    # https://github.com/dotnet/symstore/blob/main/docs/specs/SSQP_Key_Conventions.md
+    # https://github.com/dotnet/runtime/blob/main/docs/design/specs/PE-COFF.md#portable-pdb-checksum
+    expected: dict[str, tuple[str, str]] = {}
+    for probe in probes:
+        digests = probe["checksum"], probe["sha256"]
+        if expected.setdefault(probe["url"], digests) != digests:
+            raise NuGetError(f"Two symbol probes of {probe['pdb']} expect different bytes at one URL.")
+
+
 def readback(directory: Path, inventory: list[dict], probes: list[dict], work: Path, sdk: Path, *, fetcher=fetch,
              verifier=verify_signature, clock=time.monotonic, sleep=time.sleep,
              timeout: int = READBACK_SECONDS) -> dict:
     """Wait until nuget.org serves every package signed and byte-identical and every Portable PDB."""
+    validate_symbol_probes(probes)
     work.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(sdk, work / "global.json")
-    # WHY: Probes of one URL count once below; they must ask for the same checksum and expect the same bytes, or one
-    # of them would never be checked.
-    for probe in probes:
-        first = next(item for item in probes if item["url"] == probe["url"])
-        if (probe["checksum"], probe["sha256"]) != (first["checksum"], first["sha256"]):
-            raise NuGetError(f"Two symbol probes of {probe['pdb']} expect different bytes at one URL.")
-
     deadline = clock() + timeout
     verified, symbols, base = {}, set(), None
     while True:

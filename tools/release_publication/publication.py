@@ -187,7 +187,7 @@ def require_complete_draft(api, repository: str, release: dict, *, verify=attest
 
         try:
             verify_candidate(repository, Path(directory), verify=verify)
-        except (PublicationError, GitHubError) as error:
+        except (PublicationError, GitHubError, nuget.NuGetError) as error:
             raise PublicationError(f"The draft of {release.get('tag_name')} cannot be published ({error}); "
                                    f"{hint}.") from error
 
@@ -270,6 +270,7 @@ def candidate(api, environment: dict, root: Path, *, version: str, directory: Pa
     require(all(state["state"] == "absent" for state in states),
             "A package version is already on nuget.org; a new candidate needs an unused version.")
     symbols = read_json(probes)["probes"]
+    nuget.validate_symbol_probes(symbols)
     require({probe["package"] for probe in symbols} == {item["nupkg"] for item in inventory},
             "Every package needs its Portable PDB probes.")
     sboms = {}
@@ -439,11 +440,13 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
                 f"{name} differs from the candidate manifest.")
 
     require(read_json(directory / PROBES).get("probes") == manifest["symbols"], "The symbol probes differ.")
+    nuget.validate_symbol_probes(manifest["symbols"])
     source = {"source_digest": manifest["commit"], "source_ref": manifest["sourceRef"]}
     # WHY: The provenance must cover every package with its digest and come from the candidate's commit and line
     # (MySql, SafeMigrations and NestedSet); only the release-candidate workflow of this repository signs it.
     provenance = verify(directory / CANDIDATE, repository, attestation.SLSA_PROVENANCE, **source)
-    subjects = attestation.latest(provenance)["subjects"]
+    origin = attestation.latest(provenance)
+    subjects = origin["subjects"]
     for package in manifest["packages"]:
         for kind in ("nupkg", "snupkg"):
             require(subjects.get(package[kind]) == package[f"{kind}Sha256"],
@@ -456,12 +459,22 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
         require(any(item["predicate"] == read_json(directory / name) for item in attested),
                 f"No SBOM attestation of {sbom['package']} equals {name}.")
 
-    subject = attestation.tree_subject(Path(tempfile.mkdtemp(prefix="candidate-subject-")), manifest["tree"])
-    qualified = [item for item in verify(subject, repository, attestation.RELEASE_QUALIFICATION, **source)
-                 if item["predicate"].get("commit") == manifest["commit"]
-                 and item["predicate"].get("version") == manifest["version"]]
-    require(bool(qualified), f"No release qualification for {manifest['commit']} and {manifest['version']}.")
+    # WHY: A second dispatch can qualify the same commit and version without permitting publication. Use the
+    # signed run identity of the candidate, allowing earlier attempts because re-runs reuse successful jobs.
+    # https://docs.github.com/en/actions/concepts/security/artifact-attestations
+    # https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs
+    with tempfile.TemporaryDirectory(prefix="candidate-subject-") as subject_directory:
+        subject = attestation.tree_subject(Path(subject_directory), manifest["tree"])
+        qualified = [item for item in verify(subject, repository, attestation.RELEASE_QUALIFICATION, **source)
+                     if item["runId"] == origin["runId"] and item["attempt"] <= origin["attempt"]
+                     and item["predicate"].get("commit") == manifest["commit"]
+                     and item["predicate"].get("version") == manifest["version"]]
+
+    require(bool(qualified), f"No release qualification from candidate run {origin['runId']} for "
+                             f"{manifest['commit']} and {manifest['version']}.")
     manifest["qualification"] = attestation.latest(qualified)["predicate"]
+    require(manifest["qualification"]["snapshot"].get("qualificationOnly") is False,
+            "A qualification-only candidate is never published.")
     return manifest
 
 
@@ -542,8 +555,6 @@ def authorize(api, environment: dict, root: Path, directory: Path, *, verify=att
     """Recheck candidate bytes and attestations, authority, environment and signed tag; no writes."""
     repository = environment["GITHUB_REPOSITORY"]
     manifest = verify_candidate(repository, directory, verify=verify)
-    require(manifest["qualification"]["snapshot"].get("qualificationOnly") is False,
-            "A qualification-only candidate is never published.")
     authority = observe_authority(api, repository)
     policy = authority["policy"]
     require_release_workflow(policy, environment)
@@ -612,6 +623,25 @@ def latest_flag(api, repository: str, version: str) -> bool:
     # created_at attribute" Latest, so a maintenance release published later would replace a higher version.
     # https://docs.github.com/en/rest/releases/releases#get-the-latest-release
     return policies.compare_versions(version, tag[1:]) > 0
+
+
+def check_publish_target(api, repository: str, manifest: dict, directory: Path) -> None:
+    """Check the destination before NuGet receives any package."""
+    release = release_for(api, repository, manifest["tag"])
+    require(release is not None, f"The draft of {manifest['tag']} is missing.")
+    require_release_metadata(release, manifest, (directory / NOTES).read_text(encoding="utf-8"))
+    if release.get("draft"):
+        # WHY: An existing Latest can predate the repository's immutability setting. Resolve that policy check
+        # before pushing any NuGet version, and resolve it again immediately before publication.
+        # https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes
+        # https://learn.microsoft.com/en-us/nuget/nuget-org/policies/deleting-packages
+        latest_flag(api, repository, manifest["version"])
+    else:
+        require(release.get("immutable") is True, f"The published release of {manifest['tag']} is not immutable.")
+
+    expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
+    problems = draft_asset_problems(repository, release_assets(api, repository, release), expected)
+    require(not problems, f"The release of {manifest['tag']} changed since verification: {', '.join(problems)}.")
 
 
 def publish_release(api, repository: str, manifest: dict, directory: Path, *, attempts: int = 30,
@@ -699,13 +729,11 @@ def signing_key_registered(root: Path, signing_key: str) -> bool:
     return bool(key) and any(key in line for line in signers if line.strip() and not line.lstrip().startswith("#"))
 
 
-def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attestation.verify) -> dict:
-    """Check locally, without any write, that the checkout can be tagged for the version (NestedSet's pre_tag)."""
-    repository = repository_of(root)
-    release_notes(root, version)
+def require_immutable_releases(api, repository: str) -> None:
+    """Check the repository setting before any publication write."""
     # WHY: Publishing locks the release only when immutable releases are enabled; the job token cannot check it,
     # because "GET /repos/{owner}/{repo}/immutable-releases" needs the Administration permission, which a
-    # GITHUB_TOKEN never has; the maintainer's token can. The documentation names 404 for a disabled setting, but
+    # GITHUB_TOKEN never has. The documentation names 404 for a disabled setting, but
     # GitHub also answers 200 with "enabled": false (doka-labs/workflows; NestedSet answers "enabled": true).
     # https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository
     # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
@@ -718,7 +746,14 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
         setting = {"enabled": False}
 
     require(isinstance(setting, dict) and setting.get("enabled") is True,
-            f"Immutable releases are not enabled for {repository}.")
+            f"Immutable releases are not enabled for {repository}, or the token cannot read the setting.")
+
+
+def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attestation.verify) -> dict:
+    """Check locally, without any write, that the checkout can be tagged for the version (NestedSet's pre_tag)."""
+    repository = repository_of(root)
+    release_notes(root, version)
+    require_immutable_releases(api, repository)
 
     require(not run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]).strip(),
             "The checkout is not clean.")

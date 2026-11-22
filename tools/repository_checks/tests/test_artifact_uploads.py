@@ -128,6 +128,23 @@ class CheckWorkflowTests(unittest.TestCase):
 
 
 class ScannerReachTests(unittest.TestCase):
+    def test_inline_separation_whitespace_is_checked(self):
+        # Arrange
+        texts = [workflow("          path: out/*.nupkg\n").replace("uses: ", f"uses:{separator}")
+                 for separator in ("  ", "\t")]
+        messages = []
+
+        # Act
+        for text in texts:
+            try:
+                artifact_uploads.check_workflow(text, "test.yml")
+                messages.append("")
+            except artifact_uploads.UploadError as error:
+                messages.append(str(error))
+
+        # Assert
+        self.assertEqual(2, sum("is a pattern" in message for message in messages))
+
     def test_quoted_uses_is_checked(self):
         # Arrange
         text = workflow("          path: out/*.nupkg\n").replace("uses: actions/", 'uses: "actions/').replace(
