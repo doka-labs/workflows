@@ -129,7 +129,7 @@ def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tu
                     condition = line.get("condition-coverage")
                     if condition is not None:
                         match = CONDITION.search(condition)
-                        if match is None:
+                        if match is None or not 0 < int(match[2]) or int(match[1]) > int(match[2]):
                             raise CoverageError(f"{report.name} has an invalid condition-coverage value.")
 
                         # WHY: The same line from several test projects merges conservatively (SafeMigrations).

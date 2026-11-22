@@ -127,5 +127,36 @@ class CheckWorkflowTests(unittest.TestCase):
         self.assertIn("no path input", message)
 
 
+class ScannerReachTests(unittest.TestCase):
+    def test_quoted_uses_is_checked(self):
+        # Arrange
+        text = workflow("          path: out/*.nupkg\n").replace("uses: actions/", 'uses: "actions/').replace(
+            "62f4752f3646cd9\n", '62f4752f3646cd9"\n', 1)
+
+        # Act
+        with self.assertRaises(artifact_uploads.UploadError) as raised:
+            artifact_uploads.check_workflow(text, "test.yml")
+
+        # Assert
+        self.assertIn("is a pattern", str(raised.exception))
+
+    def test_yaml_extension_is_checked(self):
+        # Arrange
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        workflows = Path(directory.name) / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (workflows / "release.yaml").write_text(workflow("          path: out/*.nupkg\n"), encoding="utf-8")
+
+        # Act
+        with self.assertRaises(artifact_uploads.UploadError) as raised:
+            artifact_uploads.check_repository(Path(directory.name))
+
+        # Assert
+        self.assertIn("release.yaml", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

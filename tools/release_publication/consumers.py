@@ -128,18 +128,21 @@ def closure(assets: dict, package_id: str, version: str, frameworks: list[str]) 
                 "The consumer must not contain project references.")
 
     libraries = assets["libraries"]
-    resolved = {}
+    resolved = set()
+    # WHY: Each target framework resolves its own graph, so one dependency can appear in several versions, one per
+    # framework (a package declaring other dependency versions for net10.0 and net11.0).
     for identity, library in libraries.items():
         require(library["type"] == "package", f"The consumer resolved a non-package component: {identity}.")
         name, package_version = identity.rsplit("/", 1)
         name = name.lower()
-        require(name not in resolved, f"The consumer resolved several versions of {name}.")
         require(name not in FORBIDDEN_PACKAGES and not name.startswith(FORBIDDEN_PREFIXES),
                 f"Test or build tooling leaked into the shipped dependency graph: {name}.")
-        resolved[name] = package_version
+        resolved.add((name, package_version))
 
-    require(resolved.get(package_id.lower()) == version, f"{package_id} {version} is missing from its own closure.")
-    return set(resolved.items())
+    require((package_id.lower(), version) in resolved, f"{package_id} {version} is missing from its own closure.")
+    require(sum(name == package_id.lower() for name, _ in resolved) == 1,
+            f"The consumer resolved several versions of {package_id}.")
+    return resolved
 
 
 def require_candidate_bytes(assets: dict, cache: Path, archives: dict[str, Path], version: str) -> None:

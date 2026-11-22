@@ -20,6 +20,8 @@ from tools.release_lines import attestation
 from tools.release_lines import policy as policies
 from tools.release_lines.github import GitHubError
 
+TRX_FAILURES = ("failed", "error", "timeout", "aborted", "passedButRunAborted", "notRunnable", "disconnected")
+TRX_FAILED_OUTCOMES = ("Failed", "Error", "Timeout", "Aborted")
 TRX_NAMESPACE = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 WORKFLOW_REF = re.compile(r"([^/]+/[^/]+)/(\.github/workflows/[^@]+)@(.+)\Z")
 
@@ -131,7 +133,10 @@ def test_projects(root: Path) -> dict[str, str]:
 def evaluate(root: Path, project: Path, names: list[str]) -> dict[str, str]:
     """Return MSBuild-evaluated properties of a restored project."""
     command = ["dotnet", "msbuild", str(project), "-nologo", *(f"-getProperty:{name}" for name in names)]
-    completed = subprocess.run(command, capture_output=True, text=True, timeout=300, check=False)
+    # WHY: The CLI "looks for a global.json file iteratively navigating the path upward from the current working
+    # directory"; the job runs in the checkout of this repository, whose global.json pins another SDK.
+    # https://learn.microsoft.com/dotnet/core/tools/global-json
+    completed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=300, check=False)
     try:
         properties = json.loads(completed.stdout)["Properties"]
     except (ValueError, KeyError, TypeError) as error:
@@ -186,6 +191,17 @@ def read_trx(path: Path) -> list[dict]:
 
         assemblies[test.get("id")] = Path(code_base.replace("\\", "/")).stem
 
+    # WHY: The summary must agree with the results: NestedSet requires Counters with total equal to the number of
+    # results and failed 0, MySql failed 0. A run that errored, timed out or was aborted can still contain only
+    # passing results, so every failure counter of the TRX summary must be 0 too.
+    summary = root.find(f"{TRX_NAMESPACE}ResultSummary")
+    counters = summary.find(f"{TRX_NAMESPACE}Counters") if summary is not None else None
+    if counters is None:
+        raise QualificationError(f"{path.name} has no result summary.")
+
+    if summary.get("outcome") in TRX_FAILED_OUTCOMES or any(counters.get(name, "0") != "0" for name in TRX_FAILURES):
+        raise QualificationError(f"{path.name} reports a failed, errored, timed out or aborted run.")
+
     results = []
     for result in root.iter(f"{TRX_NAMESPACE}UnitTestResult"):
         identity = result.get("testId")
@@ -197,6 +213,9 @@ def read_trx(path: Path) -> list[dict]:
         message = result.find(f"{TRX_NAMESPACE}Output/{TRX_NAMESPACE}ErrorInfo/{TRX_NAMESPACE}Message")
         results.append({"testId": identity, "outcome": result.get("outcome"), "assembly": assemblies[identity],
                         "reason": (message.text or "").strip() if message is not None else ""})
+
+    if counters.get("total") != str(len(results)):
+        raise QualificationError(f"{path.name} summarizes another number of results than it contains.")
 
     return results
 
@@ -252,14 +271,16 @@ def check_tests(trx_files: list[Path], projects: dict[str, str], skip_projects: 
     return [{"assembly": name, **item} for name, item in sorted(summary.items())]
 
 
-def verify_pr_qualification(subject: Path, repository: str, tree: str, source_ref: str, *,
+def verify_pr_qualification(subject: Path, repository: str, tree: str, source_ref: str, workflow: str, *,
                             verify=attestation.verify) -> dict:
-    """Return the newest pull request qualification of the tree for a pull request into the line."""
+    """Return the newest qualification of the tree by the workflow for a pull request into the line."""
+    # WHY: Each PR workflow attests only its own gates (pr_predicate), so a gate counts only in an attestation of
+    # the workflow the policy names for it.
     matching = [item for item in verify(subject, repository, attestation.PR_QUALIFICATION)
                 if item["predicate"].get("tree") == tree and item["predicate"].get("repository") == repository
-                and item["predicate"].get("baseRef") == source_ref]
+                and item["predicate"].get("baseRef") == source_ref and item["predicate"].get("workflow") == workflow]
     if not matching:
-        raise QualificationError(f"No pull request into {source_ref} qualified tree {tree}.")
+        raise QualificationError(f"No pull request into {source_ref} qualified tree {tree} with {workflow}.")
 
     return attestation.latest(matching)
 
@@ -282,18 +303,27 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
     tree = git_tree(root, commit)
     subject = attestation.tree_subject(output, tree)
     gates = []
-    protected = [gate["name"] for gate in policy["qualification"]["gates"] if gate["kind"] == "protected-check"]
-    if protected:
-        pr = verify_pr_qualification(subject, repository, tree, source_ref, verify=verify)
-        attested = {gate["name"] for gate in pr["predicate"].get("gates", []) if gate.get("conclusion") == "success"}
-        missing = sorted(set(protected) - attested)
-        if missing:
-            raise QualificationError(f"The pull request qualification lacks gates: {', '.join(missing)}.")
+    protected = {}
+    for gate in policy["qualification"]["gates"]:
+        if gate["kind"] == "protected-check":
+            protected.setdefault(gate["workflow"], []).append(gate["name"])
 
-        gates.extend({"name": name, "kind": "protected-check", "runId": pr["runId"], "attempt": pr["attempt"],
-                      "pullRequest": pr["predicate"].get("pullRequest")} for name in protected)
+    for workflow, names in sorted(protected.items()):
+        pr = verify_pr_qualification(subject, repository, tree, source_ref, workflow, verify=verify)
+        attested = {gate["name"] for gate in pr["predicate"].get("gates", []) if gate.get("conclusion") == "success"}
+        missing = sorted(set(names) - attested)
+        if missing:
+            raise QualificationError(f"The pull request qualification of {workflow} lacks gates: {', '.join(missing)}.")
+
+        gates.extend({"name": name, "kind": "protected-check", "workflow": workflow, "runId": pr["runId"],
+                      "attempt": pr["attempt"], "pullRequest": pr["predicate"].get("pullRequest")} for name in names)
 
     produced = [gate["name"] for gate in policy["qualification"]["gates"] if gate["kind"] == "candidate-produced"]
+    foreign = sorted(gate["name"] for gate in policy["qualification"]["gates"]
+                     if gate["kind"] == "candidate-produced" and gate["workflow"] != workflow_path(environment))
+    if foreign:
+        raise QualificationError(f"The gates {', '.join(foreign)} belong to another workflow than this release run.")
+
     if produced:
         for gate in require_gate_jobs(run_jobs(api, repository, environment["GITHUB_RUN_ID"]), produced):
             gates.append({**gate, "kind": "candidate-produced", "runId": int(environment["GITHUB_RUN_ID"]),

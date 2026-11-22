@@ -298,7 +298,8 @@ them:
 5. The maintainer checks locally with
    `python3 -E -s -m tools.release_publication pre-tag --version <version>`
    (run from a checkout of this repository, in the product checkout or with
-   `--root`): clean checkout on the current head of the protected line, tag and
+   `--root`): immutable releases enabled (the job token cannot read that
+   setting), clean checkout on the current head of the protected line, tag and
    version unused, the draft's candidate built from this commit, SSH signing
    configured with a key listed in `.github/allowed_signers`. Then the
    maintainer creates and pushes the SSH-signed annotated tag `v<version>`.
@@ -331,6 +332,7 @@ jobs:
   preflight:
     permissions:
       contents: write
+      attestations: read
     uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v0.3.0
     with:
       version: ${{ inputs.version }}
@@ -375,6 +377,7 @@ jobs:
     if: ${{ !cancelled() && !inputs.qualification-only && (needs.candidate.result == 'success' || needs.preflight.outputs.resume == 'true') }}
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     uses: doka-labs/workflows/.github/workflows/release-publish.yml@<commit-sha> # v0.3.0

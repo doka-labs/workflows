@@ -252,12 +252,44 @@ class NuGetTests(unittest.TestCase):
         now = [0.0]
 
         # Act
-        result = nuget.readback(self.root, self.inventory, [probe], self.root / "work", fetcher=fetcher,
+        result = nuget.readback(self.root, self.inventory, [probe], self.root / "work", self.sdk(), fetcher=fetcher,
                                 verifier=lambda path, timeout: None, clock=lambda: now[0],
                                 sleep=lambda seconds: now.__setitem__(0, now[0] + seconds))
 
         # Assert
         self.assertEqual(["Doka.Core"], [item["id"] for item in result["packages"]])
+        self.assertEqual([probe["url"]], result["symbols"])
+
+    def sdk(self):
+        path = self.root / "product-global.json"
+        path.write_text('{"sdk": {"version": "10.0.404"}}', encoding="ascii")
+        return path
+
+    def test_readback_uses_the_product_sdk(self):
+        # Arrange
+        fetcher = FakeFetcher({self.url: [(200, self.signed())]})
+        seen = []
+
+        # Act
+        nuget.readback(self.root, self.inventory, [], self.root / "work", self.sdk(), fetcher=fetcher,
+                       verifier=lambda path, timeout: seen.append((path.parent / "global.json").read_text()),
+                       clock=lambda: 0.0, sleep=lambda seconds: None)
+
+        # Assert
+        self.assertEqual(['{"sdk": {"version": "10.0.404"}}'], seen)
+
+    def test_duplicate_probes_of_one_pdb_complete(self):
+        # Arrange
+        probe = {"url": "https://symbols.nuget.org/download/symbols/x.pdb/k/x.pdb", "checksum": "SHA256:00",
+                 "pdb": "lib/net10.0/Doka.Core.pdb", "sha256": __import__("hashlib").sha256(b"pdb").hexdigest()}
+        fetcher = FakeFetcher({self.url: [(200, self.signed())], probe["url"]: [(200, b"pdb")]})
+
+        # Act
+        result = nuget.readback(self.root, self.inventory, [probe, dict(probe)], self.root / "work", self.sdk(),
+                                fetcher=fetcher, verifier=lambda path, timeout: None, clock=lambda: 0.0,
+                                sleep=lambda seconds: None, timeout=30)
+
+        # Assert
         self.assertEqual([probe["url"]], result["symbols"])
 
     def test_readback_deadline_is_pending_not_failure(self):
@@ -267,7 +299,7 @@ class NuGetTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(nuget.PendingError) as raised:
-            nuget.readback(self.root, self.inventory, [], self.root / "work", fetcher=fetcher,
+            nuget.readback(self.root, self.inventory, [], self.root / "work", self.sdk(), fetcher=fetcher,
                            verifier=lambda path, timeout: None, clock=lambda: now[0],
                            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds), timeout=30)
 
@@ -595,11 +627,13 @@ class StageTests(unittest.TestCase):
         self.assertNotIn(name, result["uploaded"])
         self.assertIn(publication.CANDIDATE, result["uploaded"])
 
-    def test_asset_with_other_digest_fails(self):
+    def test_asset_with_other_digest_of_a_complete_candidate_fails(self):
         # Arrange
         name = "Doka.Core.1.2.3.nupkg"
         assets = [{"id": 1, "name": name, "state": "uploaded", "size": (self.root / name).stat().st_size,
-                   "digest": "sha256:" + "0" * 64}]
+                   "digest": "sha256:" + "0" * 64},
+                  {"id": 2, "name": publication.CANDIDATE, "state": "uploaded",
+                   "size": (self.root / publication.CANDIDATE).stat().st_size, "digest": None}]
 
         # Act
         with self.assertRaises(publication.PublicationError) as raised:
@@ -607,6 +641,30 @@ class StageTests(unittest.TestCase):
 
         # Assert
         self.assertIn("differs from the candidate", str(raised.exception))
+
+    def test_asset_of_an_unfinished_attempt_is_replaced(self):
+        # Arrange
+        name = "Doka.Core.spdx.json"
+        assets = [{"id": 1, "name": name, "state": "uploaded", "size": 3, "digest": "sha256:" + "0" * 64}]
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": assets})
+
+        # Act
+        result = publication.stage(api, REPOSITORY, self.root)
+
+        # Assert
+        self.assertIn(("DELETE", f"repos/{REPOSITORY}/releases/assets/1"), api.calls)
+        self.assertIn(name, result["uploaded"])
+
+    def test_manifest_is_uploaded_last(self):
+        # Arrange
+        assets = []
+
+        # Act
+        result = publication.stage(self.api(assets), REPOSITORY, self.root)
+
+        # Assert
+        self.assertEqual(publication.CANDIDATE, result["uploaded"][-1])
 
     def test_unexpected_draft_asset_fails(self):
         # Arrange
@@ -629,6 +687,19 @@ class StageTests(unittest.TestCase):
 
         # Assert
         self.assertIn("another title, notes or prerelease flag", str(raised.exception))
+
+
+class RecordingFakeApi(FakeApi):
+    def __init__(self, routes):
+        super().__init__(routes)
+        self.calls = []
+
+    def request(self, route, method="GET", payload=None):
+        self.calls.append((method, route))
+        if method == "DELETE":
+            return None
+
+        return super().request(route, method, payload)
 
 
 class StarterAssetTests(unittest.TestCase):
@@ -794,30 +865,38 @@ class CompleteDraftTests(unittest.TestCase):
         self.assets = {name: {"id": index, "name": name, "state": "uploaded", "digest": f"sha256:{digest}"}
                        for index, (name, digest) in enumerate(expected.items())}
         self.assets[publication.CANDIDATE] = {"id": 99, "name": publication.CANDIDATE, "state": "uploaded",
-                                              "size": len(self.data)}
-        self.attested = {attestation.SLSA_PROVENANCE, "https://spdx.dev/Document/v2.2"}
+                                              "digest": f"sha256:{__import__('hashlib').sha256(self.data).hexdigest()}"}
+        self.verified = []
+        self.failure = None
 
     def check(self):
-        original = (publication.release_assets, publication.asset_bytes, attestation.exists_for_digest)
+        def verify_candidate(repository, directory, verify=None):
+            self.verified.append(sorted(path.name for path in directory.iterdir()))
+            if self.failure is not None:
+                raise self.failure
+
+            return self.manifest
+
+        original = (publication.release_assets, publication.asset_bytes, publication.verify_candidate)
         publication.release_assets = lambda api, repository, release: self.assets
         publication.asset_bytes = lambda repository, asset: self.data
-        attestation.exists_for_digest = lambda api, repository, digest, kind: kind in self.attested
+        publication.verify_candidate = verify_candidate
         try:
             publication.require_complete_draft(None, REPOSITORY, {"tag_name": "v1.2.3"})
         finally:
-            publication.release_assets, publication.asset_bytes, attestation.exists_for_digest = original
+            publication.release_assets, publication.asset_bytes, publication.verify_candidate = original
 
-    def test_complete_draft_resumes(self):
+    def test_complete_draft_is_verified_like_publish(self):
         # Arrange
-        self.attested.add(attestation.RELEASE_ADMISSION)
+        expected = sorted(self.assets)
 
         # Act
-        result = self.check()
+        self.check()
 
         # Assert
-        self.assertIsNone(result)
+        self.assertEqual([expected], self.verified)
 
-    def test_missing_asset_stops(self):
+    def test_missing_asset_stops_before_verification(self):
         # Arrange
         del self.assets["Doka.Core.1.2.3.snupkg"]
 
@@ -827,6 +906,7 @@ class CompleteDraftTests(unittest.TestCase):
 
         # Assert
         self.assertIn("Doka.Core.1.2.3.snupkg", str(raised.exception))
+        self.assertEqual([], self.verified)
 
     def test_unfinished_asset_stops(self):
         # Arrange
@@ -839,16 +919,16 @@ class CompleteDraftTests(unittest.TestCase):
         # Assert
         self.assertIn("Doka.Core.spdx.json", str(raised.exception))
 
-    def test_missing_sbom_attestation_stops(self):
+    def test_sbom_attestation_with_other_content_stops(self):
         # Arrange
-        self.attested.discard("https://spdx.dev/Document/v2.2")
+        self.failure = publication.PublicationError("No SBOM attestation of Doka.Core.1.2.3.nupkg equals x.")
 
         # Act
         with self.assertRaises(publication.PublicationError) as raised:
             self.check()
 
         # Assert
-        self.assertIn("SBOM attestation of Doka.Core.1.2.3.nupkg", str(raised.exception))
+        self.assertIn("cannot be published (No SBOM attestation", str(raised.exception))
 
 
 class SbomHandoffTests(unittest.TestCase):
@@ -1053,6 +1133,85 @@ class PreTagHelperTests(unittest.TestCase):
 
         # Assert
         self.assertEqual(["doka-labs/Example", "doka-labs/Example"], results)
+
+
+class PublishCurrentDraftTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.manifest = candidate_directory(self.root)
+        self.release = {"id": 7, "tag_name": "v1.2.3", "name": "v1.2.3", "draft": True, "prerelease": False,
+                        "body": (self.root / publication.NOTES).read_text(encoding="utf-8")}
+        names = {*publication.expected_assets(self.manifest), publication.CANDIDATE}
+        self.assets = [{"id": index, "name": name, "state": "uploaded",
+                        "digest": f"sha256:{packages.sha256(self.root / name)}"} for index, name in enumerate(names)]
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def test_draft_changed_after_verification_is_not_published(self):
+        # Arrange
+        self.assets[0]["digest"] = "sha256:" + "0" * 64
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.publish_release(api, REPOSITORY, self.manifest, self.root, attempts=1, sleep=lambda s: None)
+
+        # Assert
+        self.assertIn("changed since its verification", str(raised.exception))
+        self.assertNotIn("PATCH", [method for method, route in api.calls])
+
+    def test_unchanged_draft_is_published(self):
+        # Arrange
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": self.assets,
+                                f"repos/{REPOSITORY}/releases/latest": {"tag_name": "v1.0.0"},
+                                f"repos/{REPOSITORY}/releases/7": {}})
+        original = publication.latest_flag
+        publication.latest_flag = lambda api, repository, version: False
+        self.addCleanup(setattr, publication, "latest_flag", original)
+
+        # Act
+        with self.assertRaises(publication.PublicationError):
+            publication.publish_release(api, REPOSITORY, self.manifest, self.root, attempts=1, sleep=lambda s: None)
+
+        # Assert
+        self.assertIn(("PATCH", f"repos/{REPOSITORY}/releases/7"), api.calls)
+
+
+class PreTagImmutableTests(unittest.TestCase):
+    def check(self, routes):
+        originals = (publication.repository_of, publication.release_notes)
+        publication.repository_of = lambda root: REPOSITORY
+        publication.release_notes = lambda root, version: "notes"
+        try:
+            publication.pre_tag(FakeApi(routes), Path("."), "1.2.3")
+        finally:
+            publication.repository_of, publication.release_notes = originals
+
+    def test_disabled_setting_stops(self):
+        # Arrange
+        routes = {f"repos/{REPOSITORY}/immutable-releases": {"enabled": False, "enforced_by_owner": False}}
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.check(routes)
+
+        # Assert
+        self.assertIn("Immutable releases are not enabled", str(raised.exception))
+
+    def test_not_found_setting_stops(self):
+        # Arrange
+        routes = {}
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.check(routes)
+
+        # Assert
+        self.assertIn("Immutable releases are not enabled", str(raised.exception))
 
 
 if __name__ == "__main__":

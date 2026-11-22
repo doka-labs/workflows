@@ -222,7 +222,7 @@ sequenceDiagram
   S->>C: workload id
   C->>API: head of protected main, release policy at that commit (Git blob checked)
   C->>C: require run on current head of main, workload declared
-  loop every active line besides main, up to four at a time
+  loop every active line besides main, all at once, all polls together at most 480 per hour
     C->>API: head of the protected line
     C->>API: workflow_dispatch(maintenance, schedule-correlation, schedule-source-sha)
     API-->>C: workflow_run_id
@@ -255,7 +255,7 @@ flowchart TB
   only -- yes --> done1(["end: qualified, never published"])
   only -- no --> cand["release-candidate / Candidate<br/>see 12"]
   cand --> sbom["release-candidate / SBOM<br/>one SBOM attestation per package"]
-  cand --> tag["maintainer: pre-tag check,<br/>SSH-signed annotated tag v&lt;version&gt;, push"]
+  cand --> tag["maintainer: pre-tag check (also immutable<br/>releases enabled), SSH-signed annotated tag<br/>v&lt;version&gt;, push"]
   tag --> approve["environment approval"]
   sbom --> publish
   approve --> publish["release-publish<br/>see 13"]
@@ -273,7 +273,7 @@ flowchart TB
   r1 -- yes --> f1(["fail: qualify another version"])
   r1 -- no --> r2{"has candidate.json?"}
   r2 -- no --> f2(["fail: delete the draft to start over"])
-  r2 -- yes --> r3{"draft: every expected asset uploaded unchanged,<br/>provenance of candidate.json and every<br/>SBOM attestation present?"}
+  r2 -- yes --> r3{"draft: every expected asset uploaded unchanged,<br/>and the publish job's candidate verification passes<br/>(provenance, exact SBOM content, qualification)?"}
   r3 -- no --> f3(["fail: re-run the failed candidate jobs,<br/>or delete the draft and start a new run"])
   r3 -- yes --> out1(["resume=true"])
   r -- no --> t1["tag v&lt;version&gt; does not exist"] --> t2["commit carries no other tag"] --> t3["version absent on nuget.org<br/>for every release package"] --> out2(["resume=false"])
@@ -306,7 +306,7 @@ flowchart TB
   c5 --> c6["packages bound to repository and commit,<br/>exactly release.packages, versions unused,<br/>write candidate.json"]
   c6 --> c7[("attest SLSA provenance<br/>packages and candidate.json")]
   c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>sboms.json: every SBOM with its digest<br/>and its package's digest")]
-  c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal, uploaded assets equal,<br/>unfinished assets deleted, missing ones uploaded"]
+  c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal; with candidate.json in the draft<br/>every asset must be equal, without it differing assets<br/>of an unfinished attempt are replaced; candidate.json last"]
   c8 --> s1["SBOM job per package: packages artifact and sboms.json,<br/>write the SBOM, both digests equal the candidate"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
 ```
 
@@ -328,7 +328,8 @@ flowchart TB
   readback -- "no: end without failure" --> rerun(["re-run the job later"])
   readback -- yes --> consumer["restore every package from nuget.org only;<br/>payload equals the candidate"]
   consumer --> recheck2["recheck"]
-  recheck2 --> rel["publish the draft by numeric ID,<br/>make_latest only for a strictly newer stable version"]
+  recheck2 --> cur["current draft assets equal the candidate"]
+  cur --> rel["publish the draft by numeric ID,<br/>make_latest only for a strictly newer stable version"]
   rel --> verify["release immutable, gh release verify,<br/>gh release verify-asset for every asset,<br/>Latest confirmed"]
 ```
 
@@ -386,7 +387,7 @@ flowchart TB
   subgraph releases["writes or sees draft releases: contents write"]
     w1["release-preflight<br/>(only to see drafts) + attestations: read"]
     w2["release-candidate / Candidate<br/>+ id-token, attestations, actions: read"]
-    w3["release-publish<br/>+ id-token, attestations,<br/>environment approval, secret NUGET_USER"]
+    w3["release-publish<br/>+ actions: read, id-token, attestations,<br/>environment approval, secret NUGET_USER"]
   end
   w3 --> nuget["nuget.org Trusted Publishing:<br/>OIDC token -> short-lived API key"]
 ```
@@ -397,7 +398,7 @@ flowchart TB
 flowchart TB
   f1["preflight fails"] --> x1["nothing written; fix line, notes or version,<br/>start a new run"]
   f2["product job or qualification fails"] --> x2["nothing published; re-run the failed jobs<br/>or start a new run"]
-  f3["Candidate fails"] --> x3["re-run: stage keeps matching assets,<br/>deletes unfinished ones, uploads the rest;<br/>other bytes in the draft stop the job"]
+  f3["Candidate fails"] --> x3["re-run: stage keeps matching assets, replaces<br/>those of the unfinished attempt and uploads<br/>candidate.json last; a complete candidate in<br/>the draft is never replaced"]
   f4["SBOM job fails"] --> x4["re-run the failed SBOM jobs; whether they find<br/>the Candidate's artifact of the earlier attempt<br/>is not documented. Otherwise delete the draft<br/>and start a new run"]
   f5["run cancelled or gone after the draft exists"] --> x5["new run of the same version: preflight resumes<br/>at publication only for a complete draft,<br/>otherwise it stops and names what is missing"]
   f6["publish stops before or during the push"] --> x6["re-run: primaries already on nuget.org with the<br/>candidate bytes are skipped, every symbol<br/>package is pushed again (409 is a warning)"]

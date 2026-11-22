@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from xml.sax.saxutils import quoteattr
 
 NUGET_SOURCE = "https://api.nuget.org/v3/index.json"
 # WHY: bin, obj and artifacts hold build output and copies of project files, as in the audit of
@@ -54,7 +55,9 @@ def write_audit_solution(path: Path, projects: list[Path]) -> None:
     """Write a solution that lists every project, independent of the repository's own solutions."""
     # WHY: Repositories keep some projects outside their solution on purpose; Doka.EntityFrameworkCore.MySql has
     # 16 example projects that are not in its .slnx but are audited by its own audit.
-    entries = "".join(f'  <Project Path="{os.path.relpath(project, path.parent)}" />\n' for project in projects)
+    # WHY: A path may contain XML special characters such as '&'; quoteattr escapes them and adds the quotes.
+    entries = "".join(f"  <Project Path={quoteattr(os.path.relpath(project, path.parent))} />\n"
+                      for project in projects)
     path.write_text(f"<Solution>\n{entries}</Solution>\n", encoding="utf-8")
 
 

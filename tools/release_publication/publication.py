@@ -93,7 +93,7 @@ def release_notes(root: Path, version: str) -> str:
 
 
 def require_release_workflow(policy: dict, environment: dict) -> None:
-    """Require the run to come from the release workflow the policy names (MySql, SafeMigrations F9)."""
+    """Require the run to come from the release workflow the policy names (MySql, SafeMigrations)."""
     expected = f"{policy['repository']}/{policy['release']['workflowPath']}@{environment.get('GITHUB_REF')}"
     require(environment.get("GITHUB_WORKFLOW_REF") == expected,
             f"Releases run only from {policy['release']['workflowPath']}.")
@@ -146,12 +146,9 @@ def asset_bytes(repository: str, asset: dict) -> bytes:
     return data.stdout
 
 
-def require_complete_draft(api, repository: str, release: dict) -> None:
-    """Require a draft that a resumed run can publish: every asset uploaded unchanged, provenance and SBOMs attested."""
-    assets = release_assets(api, repository, release)
-    manifest = json.loads(asset_bytes(repository, assets[CANDIDATE]))
-    expected = expected_assets(manifest)
-    problems = sorted(set(expected) ^ (set(assets) - {CANDIDATE}))
+def draft_asset_problems(repository: str, assets: dict[str, dict], expected: dict[str, str]) -> list[str]:
+    """Name every asset that is missing, unexpected, unfinished or other bytes than the expected digest."""
+    problems = sorted(set(expected) ^ set(assets))
     for name, digest in expected.items():
         asset = assets.get(name)
         if asset is None:
@@ -163,19 +160,31 @@ def require_complete_draft(api, repository: str, release: dict) -> None:
         if asset.get("state") != "uploaded" or actual != f"sha256:{digest}":
             problems.append(name)
 
-    candidate_digest = hashlib.sha256(asset_bytes(repository, assets[CANDIDATE])).hexdigest()
-    if not attestation.exists_for_digest(api, repository, candidate_digest, attestation.SLSA_PROVENANCE):
-        problems.append(f"provenance of {CANDIDATE}")
+    return problems
 
-    for sbom in manifest["sboms"].values():
-        package = next(item for item in manifest["packages"] if item["nupkg"] == sbom["package"])
-        if not attestation.exists_for_digest(api, repository, package["nupkgSha256"], sbom["predicateType"]):
-            problems.append(f"SBOM attestation of {sbom['package']}")
 
+def require_complete_draft(api, repository: str, release: dict, *, verify=attestation.verify) -> None:
+    """Require a draft that a resumed run can publish: the publish job's own candidate verification passes."""
+    assets = release_assets(api, repository, release)
+    data = asset_bytes(repository, assets[CANDIDATE])
+    manifest = json.loads(data)
+    expected = {**expected_assets(manifest), CANDIDATE: hashlib.sha256(data).hexdigest()}
+    problems = draft_asset_problems(repository, assets, expected)
     # WHY: A resumed run skips the candidate jobs, so a draft they did not finish could never be published; a new
-    # build would produce other bytes than the staged ones, which stage refuses (R2).
-    require(not problems, f"The draft of {release.get('tag_name')} is incomplete ({', '.join(problems)}); re-run the "
-                          "failed candidate jobs of its run, or delete the draft and start a new run.")
+    # build would produce other bytes than the staged ones, which stage refuses.
+    hint = "re-run the failed candidate jobs of its run, or delete the draft and start a new run"
+    require(not problems, f"The draft of {release.get('tag_name')} is incomplete ({', '.join(problems)}); {hint}.")
+    # WHY: An SBOM attestation of the same package digest from an earlier attempt can carry another SBOM; only the
+    # check publish runs (exact SBOM content, provenance, qualification) proves the draft publishable.
+    with tempfile.TemporaryDirectory(prefix="preflight-draft-") as directory:
+        for name, asset in assets.items():
+            (Path(directory) / name).write_bytes(data if name == CANDIDATE else asset_bytes(repository, asset))
+
+        try:
+            verify_candidate(repository, Path(directory), verify=verify)
+        except (PublicationError, GitHubError) as error:
+            raise PublicationError(f"The draft of {release.get('tag_name')} cannot be published ({error}); "
+                                   f"{hint}.") from error
 
 
 def tag_exists(api, repository: str, tag: str) -> bool:
@@ -226,10 +235,10 @@ def preflight(api, environment: dict, root: Path, *, version: str, qualification
         return {"resume": True, "tag": tag}
 
     require(not tag_exists(api, repository, tag), f"{tag} exists without a release; it cannot become a candidate.")
-    # WHY: A commit that already carries another release tag was released or prepared before (V3, all three).
+    # WHY: A commit that already carries another release tag was released or prepared before (MySql, SafeMigrations and NestedSet).
     others = tags_on_commit(root, commit)
     require(not others, f"{commit} already carries the tags {', '.join(others)}.")
-    # WHY: Proving the version unused before the long test runs avoids wasting them (NestedSet's preflight, V5).
+    # WHY: Proving the version unused before the long test runs avoids wasting them (NestedSet's preflight).
     states = nuget.unused(policy["release"]["packages"], version, fetcher=fetcher)
     taken = sorted(name for name, state in states.items() if state != "absent")
     require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
@@ -312,7 +321,7 @@ def extract_sbom(handoff_path: Path, package_id: str, directory: Path) -> Path:
 
 
 def expected_assets(manifest: dict) -> dict[str, str]:
-    """Return every asset name of the candidate besides the manifest, with its SHA-256 (R1, all three)."""
+    """Return every asset name of the candidate besides the manifest, with its SHA-256 (MySql, SafeMigrations and NestedSet)."""
     result = {NOTES: manifest["notesSha256"], PROBES: manifest["probesSha256"]}
     for package in manifest["packages"]:
         result[package["nupkg"]] = package["nupkgSha256"]
@@ -323,7 +332,7 @@ def expected_assets(manifest: dict) -> dict[str, str]:
 
 
 def require_release_metadata(release: dict, manifest: dict, notes: str) -> None:
-    """Require title, notes and prerelease flag of the release to match the candidate (R3, all three)."""
+    """Require title, notes and prerelease flag of the release to match the candidate (MySql, SafeMigrations and NestedSet)."""
     prerelease = policies.parse_version(manifest["version"]).is_prerelease
     require(release.get("name") == manifest["tag"] and release.get("body") == notes
             and release.get("prerelease") is prerelease,
@@ -331,7 +340,7 @@ def require_release_metadata(release: dict, manifest: dict, notes: str) -> None:
 
 
 def stage(api, repository: str, directory: Path) -> dict:
-    """Create the draft if missing and upload only missing assets; never replace one (NestedSet's stage, R2)."""
+    """Create the draft if missing and upload only missing assets; never replace one of a complete candidate (NestedSet's stage)."""
     manifest = read_json(directory / CANDIDATE)
     expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
     tag = manifest["tag"]
@@ -352,23 +361,31 @@ def stage(api, repository: str, directory: Path) -> dict:
     unexpected = sorted(set(present) - set(expected))
     require(not unexpected, f"The draft of {tag} has unexpected assets: {', '.join(unexpected)}.")
     uploaded = {name: asset for name, asset in present.items() if asset.get("state") == "uploaded"}
+    # WHY: candidate.json is uploaded last, so its presence marks a complete candidate whose assets are never
+    # replaced (NestedSet's validate_release). Without it the draft holds an unfinished earlier attempt; that attempt
+    # generated its own SBOMs and manifest, because sbom-tool writes a namespace ".../<packageName>/<packageVersion>/
+    # <new-guid>" into every SBOM, so its differing assets are deleted and uploaded again.
+    # https://github.com/microsoft/sbom-tool/blob/v4.1.5/README.md
+    committed = CANDIDATE in uploaded
+    stale = set()
     for name, asset in uploaded.items():
         # WHY: GitHub reports each asset's digest as "sha256:<hex>" (NestedSet v10.4.0: candidate.json digest
         # sha256:23dd49fe...); the documentation only names the field ("digest: string or null"). Another size or
-        # digest means other bytes, and an existing asset is never replaced (NestedSet's validate_release).
-        # https://docs.github.com/en/rest/releases/assets
-        require(asset.get("size") == (directory / name).stat().st_size
-                and asset.get("digest") in (None, f"sha256:{expected[name]}"),
-                f"The asset {name} of the draft differs from the candidate.")
+        # digest means other bytes. https://docs.github.com/en/rest/releases/assets
+        same = (asset.get("size") == (directory / name).stat().st_size
+                and asset.get("digest") in (None, f"sha256:{expected[name]}"))
+        if not same:
+            require(not committed, f"The asset {name} of the draft differs from the candidate.")
+            stale.add(name)
 
     # WHY: "When an upstream failure occurs, you will receive a 502 Bad Gateway status. This may leave an empty asset
     # with a state of starter. It can be safely deleted." Only such unfinished assets are deleted, and only after
     # every uploaded asset matched (MySql reconcile_draft_assets). https://docs.github.com/en/rest/releases/assets
     for name, asset in present.items():
-        if name not in uploaded:
+        if name not in uploaded or name in stale:
             api.request(f"repos/{repository}/releases/assets/{asset['id']}", "DELETE")
 
-    missing = sorted(set(expected) - set(uploaded))
+    missing = sorted(set(expected) - (set(uploaded) - stale), key=lambda name: (name == CANDIDATE, name))
     for name in missing:
         require(packages.sha256(directory / name) == expected[name], f"{name} changed before its upload.")
         run(["gh", "release", "upload", tag, str(directory / name), "--repo", repository])
@@ -398,7 +415,7 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
     expected = expected_assets(manifest)
     present = {path.name for path in directory.iterdir() if path.is_file()} - {CANDIDATE}
     # WHY: The draft stays editable until it is published; exactly the expected assets with exactly their digests
-    # may be published (R1, R2 of all three repositories).
+    # may be published (MySql, SafeMigrations and NestedSet).
     require(present == set(expected), "The candidate assets differ from the manifest: "
                                       f"{', '.join(sorted(present ^ set(expected)))}.")
     for name, digest in expected.items():
@@ -408,7 +425,7 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
     require(read_json(directory / PROBES).get("probes") == manifest["symbols"], "The symbol probes differ.")
     source = {"source_digest": manifest["commit"], "source_ref": manifest["sourceRef"]}
     # WHY: The provenance must cover every package with its digest and come from the candidate's commit and line
-    # (H3, H4 of all three repositories); only the release-candidate workflow of this repository signs it.
+    # (MySql, SafeMigrations and NestedSet); only the release-candidate workflow of this repository signs it.
     provenance = verify(directory / CANDIDATE, repository, attestation.SLSA_PROVENANCE, **source)
     subjects = attestation.latest(provenance)["subjects"]
     for package in manifest["packages"]:
@@ -416,7 +433,7 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
             require(subjects.get(package[kind]) == package[f"{kind}Sha256"],
                     f"The provenance does not cover {package[kind]}.")
 
-    # WHY: Each SBOM attestation must carry exactly the SBOM of the candidate (NestedSet, H6).
+    # WHY: Each SBOM attestation must carry exactly the SBOM of the candidate (NestedSet).
     for name, sbom in manifest["sboms"].items():
         attested = verify(directory / sbom["package"], repository, sbom["predicateType"],
                           signer=attestation.SIGNERS[attestation.SLSA_PROVENANCE], **source)
@@ -470,7 +487,7 @@ def verify_signed_tag(api, root: Path, manifest: dict) -> str:
 
 
 def verify_publisher_environment(api, repository: str, policy: dict, environment_name: str) -> None:
-    """Require reviewers and exactly the active lines as branch grants, each line protected (F2, all three)."""
+    """Require reviewers and exactly the active lines as branch grants, each line protected (MySql, SafeMigrations and NestedSet)."""
     require(environment_name == policy["release"]["environment"],
             f"The publish job runs in '{environment_name}', not in {policy['release']['environment']}.")
     base = f"repos/{repository}/environments/{quote(environment_name, safe='')}"
@@ -503,7 +520,7 @@ def verify_publisher_environment(api, repository: str, policy: dict, environment
 
 
 def authorize(api, environment: dict, root: Path, directory: Path, *, verify=attestation.verify) -> dict:
-    """Recheck candidate bytes and attestations, authority, environment and signed tag; no writes (F1-F9)."""
+    """Recheck candidate bytes and attestations, authority, environment and signed tag; no writes."""
     repository = environment["GITHUB_REPOSITORY"]
     manifest = verify_candidate(repository, directory, verify=verify)
     require(manifest["qualification"]["snapshot"].get("qualificationOnly") is False,
@@ -516,7 +533,7 @@ def authorize(api, environment: dict, root: Path, directory: Path, *, verify=att
     manifest["tagObject"] = verify_signed_tag(api, root, manifest)
     manifest["authorityCommit"] = authority["commit"]
     # WHY: Earlier admissions, from earlier attempts or runs, must name the same candidate and tag object; a
-    # different one would mean two candidates for one version (F5, F6 of all three repositories).
+    # different one would mean two candidates for one version (MySql, SafeMigrations and NestedSet).
     earlier = (verify(directory / CANDIDATE, repository, attestation.RELEASE_ADMISSION)
                if attestation.exists(api, repository, directory / CANDIDATE, attestation.RELEASE_ADMISSION) else [])
     require_same_admissions(earlier, manifest)
@@ -550,7 +567,7 @@ def verified_tag_commit(api, repository: str, tag: str) -> str:
 
 
 def latest_flag(api, repository: str, version: str) -> bool:
-    """Mark a release Latest only when it is a stable version strictly newer than the current Latest (R6)."""
+    """Mark a release Latest only when it is a stable version strictly newer than the current Latest (MySql, SafeMigrations and NestedSet)."""
     if policies.parse_version(version).is_prerelease:
         return False
 
@@ -583,6 +600,13 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
     require_release_metadata(release, manifest, (directory / NOTES).read_text(encoding="utf-8"))
     promote = False
     if release.get("draft"):
+        # WHY: The draft stays editable until it is published, and publishing an immutable release locks the assets
+        # the draft holds at that moment, not the verified copy of this job. The current assets are compared right
+        # before the edit; GitHub has no conditional edit, so verify-asset below still checks the result.
+        # https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/immutable-releases
+        expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
+        problems = draft_asset_problems(repository, release_assets(api, repository, release), expected)
+        require(not problems, f"The draft of {manifest['tag']} changed since its verification: {', '.join(problems)}.")
         promote = latest_flag(api, repository, manifest["version"])
         # WHY: The release is edited by its numeric ID; a tag-based edit "could address a replacement release
         # between inspection and mutation" (MySql publish_existing_release). make_latest "Defaults to true for
@@ -644,9 +668,26 @@ def signing_key_registered(root: Path, signing_key: str) -> bool:
 
 
 def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
-    """Check locally, without any write, that the checkout can be tagged for the version (B01 4, NestedSet)."""
+    """Check locally, without any write, that the checkout can be tagged for the version (NestedSet's pre_tag)."""
     repository = repository_of(root)
     release_notes(root, version)
+    # WHY: Publishing locks the release only when immutable releases are enabled; the job token cannot check it,
+    # because "GET /repos/{owner}/{repo}/immutable-releases" needs the Administration permission, which a
+    # GITHUB_TOKEN never has; the maintainer's token can. The documentation names 404 for a disabled setting, but
+    # GitHub also answers 200 with "enabled": false (doka-labs/workflows; NestedSet answers "enabled": true).
+    # https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository
+    # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
+    try:
+        setting = api.request(f"repos/{repository}/immutable-releases")
+    except GitHubError as error:
+        if error.code != "github_http_error" or error.http_status != 404:
+            raise
+
+        setting = {"enabled": False}
+
+    require(isinstance(setting, dict) and setting.get("enabled") is True,
+            f"Immutable releases are not enabled for {repository}.")
+
     require(not run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]).strip(),
             "The checkout is not clean.")
     branch = run(["git", "-C", str(root), "branch", "--show-current"]).strip()
@@ -665,14 +706,14 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch) -> dict:
     require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
     release = release_for(api, repository, tag)
     require(release is not None and release.get("draft") is True, f"No draft release holds a candidate for {tag}.")
-    # WHY: The tag must point at the commit the draft's candidate was built from (V6, NestedSet).
+    # WHY: The tag must point at the commit the draft's candidate was built from (NestedSet).
     asset = release_assets(api, repository, release).get(CANDIDATE)
     require(asset is not None, f"The draft of {tag} has no {CANDIDATE}.")
     manifest = json.loads(asset_bytes(repository, asset))
 
     require(manifest.get("commit") == commit and manifest.get("version") == version,
             f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")
-    # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers (B01 4, 5).
+    # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers.
     require(run(["git", "-C", str(root), "config", "--get", "gpg.format"]).strip() == "ssh",
             "Configure SSH signing (git config gpg.format ssh) before tagging.")
     signing_key = subprocess.run(["git", "-C", str(root), "config", "--get", "user.signingkey"], capture_output=True,

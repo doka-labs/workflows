@@ -133,11 +133,12 @@ def dependency_order(inventory: list[dict]) -> list[dict]:
     """Order packages so that every package follows the candidate packages it depends on."""
     # WHY: NestedSet publishes dependencies before the packages that use them, so a consumer never sees a
     # package whose candidate dependency is not on nuget.org yet.
-    remaining = {item["id"]: item for item in inventory}
+    # WHY: NuGet package IDs are case-insensitive. https://learn.microsoft.com/nuget/reference/nuspec#id
+    remaining = {item["id"].lower(): item for item in inventory}
     ordered = []
     while remaining:
         ready = sorted(name for name, item in remaining.items()
-                       if not set(item["dependencies"]) & set(remaining) - {name})
+                       if not {dependency.lower() for dependency in item["dependencies"]} & set(remaining) - {name})
         require(bool(ready), "The candidate packages depend on each other in a cycle.")
         for name in ready:
             ordered.append(remaining.pop(name))

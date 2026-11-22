@@ -180,5 +180,19 @@ class CheckTests(unittest.TestCase):
         self.assertIn("differs", str(raised.exception))
 
 
+class FlowStyleIgnoreTests(unittest.TestCase):
+    def test_flow_style_ignore_fails(self):
+        # Arrange
+        template = TEMPLATE.replace("    ignore:\n      - dependency-name: MySqlConnector\n        update-types:\n"
+                                    "          - version-update:semver-major\n", "    ignore: []\n")
+
+        # Act
+        with self.assertRaises(dependabot.DependabotError) as raised:
+            dependabot.render(policy(), template)
+
+        # Assert
+        self.assertIn("must write ignore as a block list", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

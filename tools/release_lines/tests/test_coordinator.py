@@ -436,5 +436,53 @@ class GuardTests(unittest.TestCase):
         self.assertEqual((True, False), (active, inactive))
 
 
+class ConcurrencyTests(unittest.TestCase):
+    def five_lines(self, value):
+        for major in (9, 8, 7, 6):
+            value["lines"].append({"sourceRef": f"refs/heads/maintenance/{major}.x", "role": "maintenance",
+                                   "packageMajor": major, "channel": "stable-and-prerelease", "upstreamStage": "ga",
+                                   "state": "active"})
+
+    def test_every_line_waits_at_once_with_a_scaled_poll_interval(self):
+        # Arrange
+        import threading
+
+        api = FakeApi(base_routes(raw=policy_bytes(self.five_lines)))
+        barrier = threading.Barrier(5, timeout=10)
+        intervals = []
+
+        def dispatch(*args, poll_seconds, **kwargs):
+            intervals.append(poll_seconds)
+            barrier.wait()
+            return {"verificationStatus": "success"}
+
+        # Act
+        with tempfile.TemporaryDirectory() as directory:
+            result = coordinator.coordinate(api, environment(), "audit", Path(directory) / "report.json",
+                                            dispatch=dispatch)
+
+        # Assert
+        self.assertEqual("success", result["conclusion"])
+        self.assertEqual([37.5] * 5, intervals)
+
+
+class GitHubTimeoutTests(unittest.TestCase):
+    def test_a_request_timeout_is_a_github_error(self):
+        # Arrange
+        import subprocess
+        from unittest import mock
+
+        from tools.release_lines.github import GitHub
+
+        # Act
+        with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired(["gh"], 60)):
+            with self.assertRaises(GitHubError) as raised:
+                GitHub().request("repos/doka-labs/Example/branches/main?x=1")
+
+        # Assert
+        self.assertEqual("github_timeout", raised.exception.code)
+        self.assertNotIn("x=1", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

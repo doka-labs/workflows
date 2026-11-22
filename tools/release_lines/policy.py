@@ -191,6 +191,16 @@ def _lines(entries: Any) -> None:
         raise PolicyError("Release policy must contain exactly one main line.")
 
 
+def _matches_any(pattern: str, patterns: list[str]) -> bool:
+    """Return whether a package or Prefix.* pattern lies within one of the patterns, ignoring case."""
+    item = pattern.lower()
+    for candidate in (entry.lower() for entry in patterns):
+        if item == candidate or (candidate.endswith(".*") and item.startswith(candidate[:-1])):
+            return True
+
+    return False
+
+
 def _toolchain(value: Any) -> None:
     """Validate the inputs of the toolchain check."""
     _object(value, TOOLCHAIN_FIELDS, "Toolchain")
@@ -206,6 +216,11 @@ def _toolchain(value: Any) -> None:
 
     for group in groups:
         _strings(group, PACKAGE_PATTERN, "Toolchain coherent group")
+        # WHY: The lockfile check compares only framework packages; a group member outside frameworkPackages would
+        # never be compared. NuGet package IDs are case-insensitive. https://learn.microsoft.com/nuget/reference/nuspec#id
+        outside = sorted(item for item in group if not _matches_any(item, value["frameworkPackages"]))
+        if outside:
+            raise PolicyError(f"Coherent group packages must be framework packages: {', '.join(outside)}.")
 
     _strings(value["lockfiles"], RELATIVE_PATTERN, "Toolchain lockfiles")
     if any(item.startswith("/") or ".." in item.split("/") for item in value["lockfiles"]):

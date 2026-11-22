@@ -208,5 +208,50 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("exactly the candidate archive", str(raised.exception))
 
 
+class FrameworkClosureTests(unittest.TestCase):
+    def two_frameworks(self, libraries):
+        dependencies = {"Doka.Core": {"version": "[1.2.3, 1.2.3]"}}
+        frameworks = {name: {"dependencies": dependencies} for name in ("net10.0", "net11.0")}
+        return {"targets": {"net10.0": {}, "net11.0": {}},
+                "project": {"frameworks": frameworks,
+                            "restore": {"frameworks": {name: {"projectReferences": {}} for name in frameworks}}},
+                "libraries": {key: {"type": "package"} for key in libraries}}
+
+    def test_one_dependency_version_per_framework_passes(self):
+        # Arrange
+        value = self.two_frameworks(["Doka.Core/1.2.3", "Microsoft.Extensions.Logging/10.0.0",
+                                     "Microsoft.Extensions.Logging/11.0.0"])
+
+        # Act
+        resolved = consumers.closure(value, "Doka.Core", "1.2.3", ["net10.0", "net11.0"])
+
+        # Assert
+        self.assertEqual({("doka.core", "1.2.3"), ("microsoft.extensions.logging", "10.0.0"),
+                          ("microsoft.extensions.logging", "11.0.0")}, resolved)
+
+    def test_two_versions_of_the_package_itself_fail(self):
+        # Arrange
+        value = self.two_frameworks(["Doka.Core/1.2.3", "Doka.Core/1.2.4"])
+
+        # Act
+        with self.assertRaises(consumers.ConsumerError) as raised:
+            consumers.closure(value, "Doka.Core", "1.2.3", ["net10.0", "net11.0"])
+
+        # Assert
+        self.assertIn("several versions of Doka.Core", str(raised.exception))
+
+
+class DependencyOrderTests(unittest.TestCase):
+    def test_dependency_ids_match_ignoring_case(self):
+        # Arrange
+        inventory = [{"id": "Doka.Ext", "dependencies": ["doka.core"]}, {"id": "Doka.Core", "dependencies": []}]
+
+        # Act
+        ordered = packages.dependency_order(inventory)
+
+        # Assert
+        self.assertEqual(["Doka.Core", "Doka.Ext"], [item["id"] for item in ordered])
+
+
 if __name__ == "__main__":
     unittest.main()

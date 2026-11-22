@@ -17,7 +17,7 @@ from pathlib import Path
 
 TEXT_EXTENSIONS = frozenset((".json", ".log", ".trx", ".txt", ".sql", ".md", ".xml", ".csv", ".sarif"))
 GLOB_CHARACTERS = re.compile(r"[*?\[\]]")
-UPLOAD = re.compile(r"^(?P<indent> *)(?:- )?uses: actions/upload-artifact@", re.MULTILINE)
+UPLOAD = re.compile(r"^(?P<indent> *)(?:- )?uses: [\"']?actions/upload-artifact@", re.MULTILINE)
 
 
 class UploadError(RuntimeError):
@@ -110,7 +110,10 @@ def check_workflow(text: str, label: str) -> int:
 def check_repository(root: Path) -> int:
     """Check all workflows of the repository and return the number of upload steps."""
     total = 0
-    for path in sorted((root / ".github" / "workflows").glob("*.yml")):
+    # WHY: GitHub reads workflow files with both extensions: "Workflow files use YAML syntax, and must have either a
+    # .yml or .yaml file extension." https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+    workflows = root / ".github" / "workflows"
+    for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")]):
         total += check_workflow(path.read_text(encoding="utf-8"), path.relative_to(root).as_posix())
 
     return total

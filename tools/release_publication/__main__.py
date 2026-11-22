@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     readback = commands.add_parser("readback")
     readback.add_argument("--candidate", type=Path, required=True)
     readback.add_argument("--work", type=Path, required=True)
+    readback.add_argument("--root", type=Path, required=True, help="Product checkout whose global.json is used.")
     release = commands.add_parser("publish-release")
     release.add_argument("--root", type=Path, required=True)
     release.add_argument("--candidate", type=Path, required=True)
@@ -183,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "readback":
             try:
                 result = nuget.readback(args.candidate.resolve(), manifest["packages"], manifest["symbols"],
-                                        args.work.resolve())
+                                        args.work.resolve(), args.root.resolve() / "global.json")
             except nuget.PendingError as error:
                 # WHY: The packages are pushed; only nuget.org's indexing is late. The run ends without red and
                 # without publishing the release; re-running this job continues here.
@@ -198,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         # WHY: Bytes, attestations, authority, environment and tag are checked again before the release is published
-        # (F7 of all three repositories).
+        # (MySql, SafeMigrations and NestedSet).
         manifest = publication.authorize(api, environment, args.root.resolve(), args.candidate.resolve())
         released = publication.publish_release(api, environment["GITHUB_REPOSITORY"], manifest, args.candidate.resolve())
         _summary(f"## Released {manifest['tag']}\n\n{released.get('html_url', '')}")

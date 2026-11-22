@@ -7,11 +7,13 @@ from tools.release_lines.github import GitHubError
 
 NAMESPACE = "http://microsoft.com/schemas/VisualStudio/TeamTest/2010"
 TREE = "c" * 40
+CI = ".github/workflows/ci.yml"
+OTHER = ".github/workflows/other.yml"
 PROJECTS = {"Doka.Example.Tests": "tests/Doka.Example.Tests/Doka.Example.Tests.csproj",
             "Doka.Example.FunctionalTests": "tests/Doka.Example.FunctionalTests/Doka.Example.FunctionalTests.csproj"}
 
 
-def trx(results):
+def trx(results, outcome=None, counters=None):
     definitions, entries = [], []
     for index, (assembly, outcome, reason) in enumerate(results):
         test_id = f"00000000-0000-0000-0000-{index:012d}"
@@ -22,17 +24,23 @@ def trx(results):
         entries.append(f'<UnitTestResult testId="{test_id}" testName="T{index}" outcome="{outcome}">{output}'
                        "</UnitTestResult>")
 
+    failed = sum(item[1] == "Failed" for item in results)
+    values = {"total": len(results), "failed": failed, "error": 0, "timeout": 0, "aborted": 0, **(counters or {})}
+    summary = (f'<ResultSummary outcome="{outcome or ("Failed" if failed else "Completed")}"><Counters '
+               + " ".join(f'{name}="{value}"' for name, value in values.items()) + " /></ResultSummary>")
     return (f'<?xml version="1.0" encoding="utf-8"?><TestRun xmlns="{NAMESPACE}"><Results>{"".join(entries)}'
-            f'</Results><TestDefinitions>{"".join(definitions)}</TestDefinitions></TestRun>')
+            f'</Results><TestDefinitions>{"".join(definitions)}</TestDefinitions>{summary}</TestRun>')
 
 
 class TestResultTests(unittest.TestCase):
+    summary = {}
+
     def check(self, files, skips=frozenset()):
         with tempfile.TemporaryDirectory() as directory:
             paths = []
             for name, results in files.items():
                 path = Path(directory) / name
-                path.write_text(trx(results), encoding="utf-8")
+                path.write_text(trx(results, **self.summary), encoding="utf-8")
                 paths.append(path)
 
             return qualification.check_tests(paths, PROJECTS, set(skips))
@@ -63,7 +71,40 @@ class TestResultTests(unittest.TestCase):
         message = self.failure(files)
 
         # Assert
+        self.assertIn("reports a failed, errored, timed out or aborted run", message)
+
+    def test_failed_result_under_a_clean_summary_fails(self):
+        # Arrange
+        files = {"unit.trx": [("Doka.Example.Tests", "Failed", None), ("Doka.Example.FunctionalTests", "Passed", None)]}
+        self.summary = {"outcome": "Completed", "counters": {"failed": 0}}
+
+        # Act
+        message = self.failure(files)
+
+        # Assert
         self.assertIn("ended with Failed", message)
+
+    def test_aborted_run_with_passing_results_fails(self):
+        # Arrange
+        files = {"unit.trx": [("Doka.Example.Tests", "Passed", None), ("Doka.Example.FunctionalTests", "Passed", None)]}
+        self.summary = {"outcome": "Aborted", "counters": {"error": 1}}
+
+        # Act
+        message = self.failure(files)
+
+        # Assert
+        self.assertIn("reports a failed, errored, timed out or aborted run", message)
+
+    def test_summary_with_another_total_fails(self):
+        # Arrange
+        files = {"unit.trx": [("Doka.Example.Tests", "Passed", None), ("Doka.Example.FunctionalTests", "Passed", None)]}
+        self.summary = {"outcome": None, "counters": {"total": 3}}
+
+        # Act
+        message = self.failure(files)
+
+        # Assert
+        self.assertIn("summarizes another number of results", message)
 
     def test_project_without_results_fails(self):
         # Arrange
@@ -241,11 +282,12 @@ class PrQualificationTests(unittest.TestCase):
 
     def test_newest_matching_attestation_is_selected(self):
         # Arrange
-        base = {"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/main"}
-        fake = self.verify([(base, 10, 1), (base, 12, 1), (base, 12, 2), ({**base, "baseRef": "refs/heads/x"}, 99, 1)])
+        base = {"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/main", "workflow": CI}
+        fake = self.verify([(base, 10, 1), (base, 12, 1), (base, 12, 2), ({**base, "baseRef": "refs/heads/x"}, 99, 1),
+                            ({**base, "workflow": OTHER}, 98, 1)])
 
         # Act
-        selected = qualification.verify_pr_qualification(Path("s"), "doka-labs/Example", TREE, "refs/heads/main",
+        selected = qualification.verify_pr_qualification(Path("s"), "doka-labs/Example", TREE, "refs/heads/main", CI,
                                                          verify=fake)
 
         # Assert
@@ -253,15 +295,29 @@ class PrQualificationTests(unittest.TestCase):
 
     def test_attestation_of_other_line_fails(self):
         # Arrange
-        fake = self.verify([({"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/x"}, 1, 1)])
+        fake = self.verify([({"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/x",
+                              "workflow": CI}, 1, 1)])
 
         # Act
         with self.assertRaises(qualification.QualificationError) as raised:
-            qualification.verify_pr_qualification(Path("s"), "doka-labs/Example", TREE, "refs/heads/main",
+            qualification.verify_pr_qualification(Path("s"), "doka-labs/Example", TREE, "refs/heads/main", CI,
                                                   verify=fake)
 
         # Assert
         self.assertIn("No pull request into refs/heads/main", str(raised.exception))
+
+    def test_attestation_of_other_workflow_fails(self):
+        # Arrange
+        fake = self.verify([({"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/main",
+                              "workflow": OTHER}, 1, 1)])
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            qualification.verify_pr_qualification(Path("s"), "doka-labs/Example", TREE, "refs/heads/main", CI,
+                                                  verify=fake)
+
+        # Assert
+        self.assertIn(f"with {CI}", str(raised.exception))
 
 
 class AttestationTests(unittest.TestCase):
@@ -321,6 +377,98 @@ class AttestationTests(unittest.TestCase):
 
         # Assert
         self.assertIn("run identity", str(raised.exception))
+
+
+class GateBindingTests(unittest.TestCase):
+    RELEASE = ".github/workflows/release.yml"
+
+    def qualify(self, gates, attested):
+        from unittest import mock
+
+        from tools.release_lines import coordinator
+
+        policy = {"repository": "doka-labs/Example", "release": {"packages": []},
+                  "qualification": {"gates": gates, "testResults": {"skips": []}}}
+        environment = {"GITHUB_REPOSITORY": "doka-labs/Example", "GITHUB_REF": "refs/heads/main",
+                       "GITHUB_SHA": "a" * 40, "GITHUB_RUN_ID": "5", "GITHUB_RUN_ATTEMPT": "1",
+                       "GITHUB_WORKFLOW_REF": f"doka-labs/Example/{self.RELEASE}@refs/heads/main"}
+
+        def verify(subject, repository, predicate_type):
+            return [{"predicate": {"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/main",
+                                   "workflow": workflow, "gates": [{"name": name, "conclusion": "success"}
+                                                                   for name in names]},
+                     "runId": index + 1, "attempt": 1} for index, (workflow, names) in enumerate(attested)]
+
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(qualification, "git_tree", return_value=TREE), \
+                mock.patch.object(coordinator, "observe_authority", return_value={"policy": policy, "commit": "b" * 40}), \
+                mock.patch.object(qualification.policies, "freeze_line", return_value={}), \
+                mock.patch.object(qualification, "run_jobs", return_value=[
+                    {"name": "release / Build", "status": "completed", "conclusion": "success"}]), \
+                mock.patch.object(qualification, "check_tests", return_value=[]), \
+                mock.patch.object(qualification, "test_projects", return_value={}), \
+                mock.patch.object(qualification, "require_package_validation", return_value=[]):
+            return qualification.qualify(None, environment, Path(directory), version="1.2.3", qualification_only=False,
+                                         trx_dir=Path(directory), output=Path(directory), verify=verify)
+
+    def test_each_gate_counts_in_the_attestation_of_its_workflow(self):
+        # Arrange
+        gates = [{"name": "ci / Build", "kind": "protected-check", "workflow": CI},
+                 {"name": "other / Check", "kind": "protected-check", "workflow": OTHER}]
+
+        # Act
+        result = self.qualify(gates, [(CI, ["ci / Build"]), (OTHER, ["other / Check"])])
+
+        # Assert
+        self.assertEqual(2, result["gates"])
+
+    def test_gate_attested_by_another_workflow_fails(self):
+        # Arrange
+        gates = [{"name": "ci / Build", "kind": "protected-check", "workflow": CI}]
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.qualify(gates, [(OTHER, ["ci / Build"])])
+
+        # Assert
+        self.assertIn(f"with {CI}", str(raised.exception))
+
+    def test_candidate_gate_of_another_workflow_fails(self):
+        # Arrange
+        gates = [{"name": "release / Build", "kind": "candidate-produced", "workflow": OTHER}]
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.qualify(gates, [])
+
+        # Assert
+        self.assertIn("belong to another workflow", str(raised.exception))
+
+    def test_candidate_gate_of_this_workflow_passes(self):
+        # Arrange
+        gates = [{"name": "release / Build", "kind": "candidate-produced", "workflow": self.RELEASE}]
+
+        # Act
+        result = self.qualify(gates, [])
+
+        # Assert
+        self.assertEqual(1, result["gates"])
+
+
+class EvaluateTests(unittest.TestCase):
+    def test_msbuild_runs_in_the_product_checkout(self):
+        # Arrange
+        from unittest import mock
+
+        root = Path("/product")
+        completed = mock.Mock(returncode=0, stdout='{"Properties": {"PackageId": "Doka.Core"}}')
+
+        # Act
+        with mock.patch.object(qualification.subprocess, "run", return_value=completed) as run:
+            qualification.evaluate(root, root / "src/A/A.csproj", ["PackageId"])
+
+        # Assert
+        self.assertEqual(root, run.call_args.kwargs["cwd"])
 
 
 if __name__ == "__main__":

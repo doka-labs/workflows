@@ -36,10 +36,14 @@ jobs:
   publish:
     name: Publish
     # WHY: contents write lists the draft and publishes the release; id-token signs the admission and obtains the
-    # NuGet credential through Trusted Publishing; attestations write stores the admission.
+    # NuGet credential through Trusted Publishing; attestations write stores the admission. actions read is the
+    # repository permission of "GET /repos/{owner}/{repo}/environments/{environment_name}" and of its deployment
+    # branch policies, which the environment check reads.
     # https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
+    # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
     permissions:
       contents: write
+      actions: read
       id-token: write
       attestations: write
     environment: ${{ inputs.environment }}
@@ -127,7 +131,7 @@ jobs:
           user: ${{ secrets.NUGET_USER }}
 
       # WHY: Bytes, attestations, authority, environment and tag are checked again right before the first
-      # irreversible write (F7 of all three repositories).
+      # irreversible write (MySql, SafeMigrations and NestedSet).
       - name: Recheck before pushing to nuget.org
         working-directory: .workflows
         env:
@@ -161,7 +165,9 @@ jobs:
         working-directory: .workflows
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 -E -s -m tools.release_publication readback --candidate "$RUNNER_TEMP/candidate" --work "$RUNNER_TEMP/readback"
+        run: >-
+          python3 -E -s -m tools.release_publication readback --candidate "$RUNNER_TEMP/candidate"
+          --work "$RUNNER_TEMP/readback" --root "$GITHUB_WORKSPACE/repository"
 
       # WHY: A consumer that restores each package from nuget.org only must receive the candidate's payload before
       # the release is published (MySql's isolated consumer).

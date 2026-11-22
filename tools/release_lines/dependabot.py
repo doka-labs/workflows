@@ -59,6 +59,11 @@ def entries(template: str) -> list[tuple[str, str]]:
         if "directory" not in keys and "directories" not in keys:
             raise DependabotError(f"Template entry {match[1]} needs directory or directories.")
 
+        # WHY: The generator appends its rules below a block-style "    ignore:" key; a flow-style value such as
+        # "ignore: []" would end up as a second ignore key next to the generated one.
+        if any(line.startswith("    ignore:") and line != "    ignore:" for line in block.splitlines()):
+            raise DependabotError(f"Template entry {match[1]} must write ignore as a block list.")
+
         result.append((match[1], block))
 
     return result

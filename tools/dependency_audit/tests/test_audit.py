@@ -175,5 +175,23 @@ class CacheLocationTests(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class AuditSolutionTests(unittest.TestCase):
+    def test_xml_special_characters_in_a_path_stay_valid(self):
+        # Arrange
+        import xml.etree.ElementTree as ElementTree
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        project = root / "src" / "R&D <x>" / "A.csproj"
+
+        # Act
+        audit.write_audit_solution(root / "audit.slnx", [project])
+
+        # Assert
+        element = ElementTree.parse(root / "audit.slnx").getroot().find("Project")
+        self.assertEqual("src/R&D <x>/A.csproj", element.get("Path"))
+
+
 if __name__ == "__main__":
     unittest.main()

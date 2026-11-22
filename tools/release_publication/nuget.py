@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import time
 from http.client import HTTPException
@@ -131,19 +132,23 @@ def availability(directory: Path, inventory: list[dict], *, fetcher=fetch) -> li
 
 
 def verify_signature(path: Path, timeout: float) -> None:
-    """Verify a downloaded package's signatures with the SDK."""
-    # WHY: https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-verify
-    result = subprocess.run(["dotnet", "nuget", "verify", str(path), "--all"], capture_output=True, text=True,
-                            timeout=timeout, check=False)
+    """Verify a downloaded package's signatures with the SDK that the global.json next to it selects."""
+    # WHY: The CLI "looks for a global.json file iteratively navigating the path upward from the current working
+    # directory"; the readback directory holds a copy of the product's global.json, not this repository's.
+    # https://learn.microsoft.com/dotnet/core/tools/global-json
+    # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-verify
+    result = subprocess.run(["dotnet", "nuget", "verify", str(path), "--all"], cwd=path.parent, capture_output=True,
+                            text=True, timeout=timeout, check=False)
     if result.returncode:
         raise NuGetError(f"The signature of {path.name} on nuget.org does not verify.")
 
 
-def readback(directory: Path, inventory: list[dict], probes: list[dict], work: Path, *, fetcher=fetch,
+def readback(directory: Path, inventory: list[dict], probes: list[dict], work: Path, sdk: Path, *, fetcher=fetch,
              verifier=verify_signature, clock=time.monotonic, sleep=time.sleep,
              timeout: int = READBACK_SECONDS) -> dict:
     """Wait until nuget.org serves every package signed and byte-identical and every Portable PDB."""
     work.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(sdk, work / "global.json")
     deadline = clock() + timeout
     verified, symbols, base = {}, set(), None
     while True:
@@ -191,7 +196,8 @@ def readback(directory: Path, inventory: list[dict], probes: list[dict], work: P
                 except PendingError as error:
                     pending.append(str(error))
 
-        if len(verified) == len(inventory) and len(symbols) == len(probes):
+        # WHY: Two assemblies can carry the same Portable PDB, which gives two probes with one URL.
+        if len(verified) == len(inventory) and symbols == {probe["url"] for probe in probes}:
             return {"packages": [{"id": package["id"], "publicSha256": verified[package["id"]]}
                                  for package in inventory], "symbols": sorted(symbols)}
 

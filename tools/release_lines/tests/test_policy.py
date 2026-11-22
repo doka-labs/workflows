@@ -367,5 +367,31 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("policyCommit", str(raised.exception))
 
 
+class CoherentGroupTests(unittest.TestCase):
+    def test_group_member_outside_framework_packages_fails(self):
+        # Arrange
+        value = example()
+        value["toolchain"]["coherentGroups"] = [["Microsoft.EntityFrameworkCore", "Pomelo.EntityFrameworkCore.MySql"]]
+
+        # Act
+        with self.assertRaises(policy.PolicyError) as raised:
+            policy.validate_policy(value)
+
+        # Assert
+        self.assertIn("Pomelo.EntityFrameworkCore.MySql", str(raised.exception))
+
+    def test_group_inside_framework_patterns_passes(self):
+        # Arrange
+        value = example()
+        value["toolchain"]["coherentGroups"] = [["microsoft.entityframeworkcore.relational",
+                                                 "Microsoft.EntityFrameworkCore.Design"]]
+
+        # Act
+        result = policy.validate_policy(value)
+
+        # Assert
+        self.assertEqual(value["toolchain"]["coherentGroups"], result["toolchain"]["coherentGroups"])
+
+
 if __name__ == "__main__":
     unittest.main()

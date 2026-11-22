@@ -161,5 +161,20 @@ class PolicyTests(unittest.TestCase):
         self.assertIn("belong to a policy assembly", str(raised.exception))
 
 
+class ConditionValueTests(unittest.TestCase):
+    def test_more_covered_than_total_branches_fails(self):
+        # Arrange
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        Path(directory.name, "r.cobertura.xml").write_text(report([(1, 1, 2, 1)]), encoding="utf-8")
+
+        # Act
+        with self.assertRaises(coverage.CoverageError) as raised:
+            coverage.verify(Path(directory.name), policy(), ["Doka.Core"], now=NOW)
+
+        # Assert
+        self.assertIn("invalid condition-coverage", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

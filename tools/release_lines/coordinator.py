@@ -34,11 +34,16 @@ VISIBILITY_SECONDS = 300
 RESULT_SECONDS = 120
 # WHY: The polling interval of the MySql and SafeMigrations coordinators.
 POLL_SECONDS = 15
+# WHY: "The rate limit for GITHUB_TOKEN is 1,000 requests per hour per repository"; the polls of all lines together
+# stay at 480 per hour, half of it, so job listings and other runs of the repository keep their share.
+# https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api
+POLLS_PER_HOUR = 480
 PRE_EXECUTION = ("queued", "pending", "requested", "waiting")
 STATES = (*PRE_EXECUTION, "in_progress", "completed")
 CONCLUSIONS = (None, "success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required",
                "stale", "startup_failure")
 FORBIDDEN_JOB_CONCLUSIONS = ("failure", "cancelled", "timed_out")
+FAILURES = (GitHubError, policies.PolicyError, OSError, subprocess.SubprocessError, ValueError)
 
 
 def positive_identity(value: Any) -> int:
@@ -210,7 +215,7 @@ def _check_identity(run: dict, identities: dict, expected_title: str, *, initial
 
 def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: str, commit: str,
                  correlation: str, *, record: Callable[[dict], None], clock=time.monotonic,
-                 sleep=time.sleep) -> dict:
+                 sleep=time.sleep, poll_seconds: float = POLL_SECONDS) -> dict:
     """Wait for a dispatched run within the workload budget and verify its identity and jobs."""
     started = clock()
     deadline = started + workload["timeoutMinutes"] * 60
@@ -222,7 +227,7 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
     expected_title = f"maintenance {correlation}"
 
     def pause(until: float) -> None:
-        sleep(min(POLL_SECONDS, max(0.0, until - clock())))
+        sleep(min(poll_seconds, max(0.0, until - clock())))
 
     while True:
         try:
@@ -298,7 +303,7 @@ def wait_for_run(api, repository: str, run_id: int, workload: dict, source_ref: 
 
 
 def dispatch_line(api, repository: str, workload: dict, source_ref: str, correlation: str, *,
-                  record: Callable[[dict], None], wait=wait_for_run) -> dict:
+                  record: Callable[[dict], None], wait=wait_for_run, poll_seconds: float = POLL_SECONDS) -> dict:
     """Dispatch the workload on one line at its exact protected head and wait for the result."""
     commit = protected_head(api, repository, source_ref)
     record({"sourceCommit": commit, "verificationStatus": "resolved"})
@@ -311,7 +316,8 @@ def dispatch_line(api, repository: str, workload: dict, source_ref: str, correla
     run_id = positive_identity(response.get("workflow_run_id") if isinstance(response, dict) else None)
     record({"runId": run_id, "verificationStatus": "dispatched"})
 
-    return wait(api, repository, run_id, workload, source_ref, commit, correlation, record=record)
+    return wait(api, repository, run_id, workload, source_ref, commit, correlation, record=record,
+                poll_seconds=poll_seconds)
 
 
 def persist_report(path: Path, report: dict) -> None:
@@ -339,7 +345,7 @@ def coordinate(api, environment: dict, workload_id: str, output: Path, *, dispat
                               code="policy_invalid")
 
         correlation = correlation_for(environment.get("GITHUB_RUN_ID"), environment.get("GITHUB_RUN_ATTEMPT"))
-    except GitHubError as error:
+    except FAILURES as error:
         report.update(conclusion="failure", failure=failure_observation(error))
         persist_report(output, report)
         raise
@@ -356,16 +362,20 @@ def coordinate(api, environment: dict, workload_id: str, output: Path, *, dispat
             persist_report(output, report)
 
     persist_report(output, report)
-    # WHY: SafeMigrations waits for up to four lines at a time; lines are independent dispatched runs.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    # WHY: Every line waits at once: each run has the workload budget of at most 330 minutes, and lines waiting in
+    # turn (SafeMigrations waited for four at a time) would add their budgets beyond the 360-minute job. The poll
+    # interval grows with the number of lines instead, so the request rate stays the same.
+    poll_seconds = max(POLL_SECONDS, 3600 * len(targets) / POLLS_PER_HOUR)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(targets))) as executor:
         futures = [(index, executor.submit(dispatch, api, repository, workload, line["sourceRef"], correlation,
-                                           record=lambda update, owner=index: record(owner, update)))
+                                           record=lambda update, owner=index: record(owner, update),
+                                           poll_seconds=poll_seconds))
                    for index, line in enumerate(targets)]
         # WHY: Every future is collected so a failing line cannot hide the outcome of another.
         for index, future in futures:
             try:
                 record(index, future.result())
-            except (GitHubError, policies.PolicyError, OSError, subprocess.SubprocessError, ValueError) as error:
+            except FAILURES as error:
                 record(index, failure_observation(error))
 
     report["conclusion"] = "success" if all(child["verificationStatus"] == "success"

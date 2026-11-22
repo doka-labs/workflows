@@ -14,6 +14,7 @@ API_VERSION = "2026-03-10"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 FAILURE_CODES = frozenset((
     "failed", "github_http_error", "github_request_failed", "github_invalid_response", "github_response_limit",
+    "github_timeout",
     "policy_invalid", "authority_mismatch", "branch_unprotected", "dispatch_invalid", "child_identity_mismatch",
     "child_visibility_timeout", "child_wait_timeout", "child_result_timeout", "child_failed", "child_state_invalid",
     "jobs_invalid", "jobs_unsuccessful"))
@@ -52,8 +53,13 @@ class GitHub:
         if payload is not None:
             command.extend(["--input", "-"])
 
-        completed = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
-                                   capture_output=True, text=True, timeout=60, check=False)
+        try:
+            completed = subprocess.run(command, input=json.dumps(payload) if payload is not None else None,
+                                       capture_output=True, text=True, timeout=60, check=False)
+        except subprocess.TimeoutExpired as error:
+            raise GitHubError(f"GitHub did not answer {method} {route.split('?', 1)[0]} in time.",
+                              code="github_timeout") from error
+
         if len(completed.stdout) > MAX_RESPONSE_BYTES + 65536:
             raise GitHubError("GitHub response exceeded its size bound.", code="github_response_limit")
 
