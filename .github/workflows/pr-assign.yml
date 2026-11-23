@@ -1,0 +1,52 @@
+name: PR Assign
+
+# Assigns the author of a new or reopened pull request, so lists show who
+# drives it. Bots and pull requests from forks are left alone: no person
+# drives a bot's pull request, and a fork's token is read-only.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the assign job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions: {}
+
+jobs:
+  assign:
+    name: Assign
+    # WHY: "The GITHUB_TOKEN has read-only permissions in pull requests from forked repositories", and Dependabot
+    # pull requests are "treated as though they are from a forked repository", so only same-repository pull
+    # requests by people can be assigned.
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    # WHY: Adding assignees needs the "Pull requests" (or "Issues") repository permission with write access.
+    # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
+    permissions:
+      pull-requests: write
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: the job makes two API requests.
+    timeout-minutes: 5
+
+    steps:
+      # WHY: "Only users with push access can add assignees to an issue. Assignees are silently ignored otherwise",
+      # so the author is checked first and a user who cannot be assigned gets a notice instead of a red run.
+      # The endpoint adds assignees and does not replace existing ones. https://docs.github.com/en/rest/issues/assignees
+      - name: Assign the author
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if ! gh api "repos/$GITHUB_REPOSITORY/assignees/$AUTHOR" --silent 2>/dev/null; then
+            echo "::notice::$AUTHOR cannot be assigned in $GITHUB_REPOSITORY."
+            exit 0
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$NUMBER/assignees" -f "assignees[]=$AUTHOR" --silent
+          echo "Assigned $AUTHOR to pull request #$NUMBER."

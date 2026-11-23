@@ -296,6 +296,31 @@ consumer per package that must restore the exact bytes, and a validated SBOM
 per package. The caller's build job uploads every `.nupkg` and `.snupkg` as
 one artifact and passes the packed version.
 
+### `pr-assign.yml`
+
+Assigns the author of a new or reopened pull request, so lists show who
+drives it. Bots such as Dependabot are left out, and so are pull requests from
+forks, whose token is read-only. An author who cannot be assigned in the
+repository gets a notice, not a red run.
+
+```yaml
+name: Pull Request
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+
+permissions: {}
+
+jobs:
+  assign:
+    permissions:
+      pull-requests: write
+    uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v0.1.0
+```
+
 ### Documentation-only changes
 
 `change-scope.yml` classifies a pull request by `git diff` between its base
