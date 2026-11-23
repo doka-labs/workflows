@@ -299,17 +299,35 @@ one artifact and passes the packed version.
 ### Documentation-only changes
 
 `change-scope.yml` classifies a pull request by `git diff` between its base
-and the tested merge commit. It is `docs` only when every changed path matches
-`.github/change-scope.json` and none of them can reach a build, a test or a
-package; every other change and every other event is `full`. Never
-documentation, whatever the policy lists:
+and the tested merge commit. `.github/change-scope.json` is the repository's
+contract: the paths it lists are declared independent of every build, test and
+package. A change is `docs` only when every changed path is declared there and
+the checks below find no dependency; anything unknown, every other change and
+every other event is `full`. Static checks cannot prove that nothing reads a
+file, because a task or a test can open any path; they find the dependencies a
+repository writes down. Never documentation, whatever the policy lists:
 
-- `.github/**` (the policy itself included), `global.json`, source, MSBuild,
-  JSON, YAML, Python and shell files;
-- everything below a directory with a `.csproj`, because SDK projects include
-  the files of their directory by default;
-- every path an MSBuild item names in `Include` or `Update`, such as a packed
-  `README.md`, and every file of a name built from an unresolved property.
+- `.github/**` (the policy itself included), `global.json`, source, MSBuild
+  (`.csproj`, `.fsproj`, `.vbproj`, `.sqlproj`, `.props`, `.targets`, `.proj`,
+  `.projitems`, `.shproj`), analyzer and signing configuration
+  (`.editorconfig`, `.globalconfig`, `.ruleset`, `.snk`, `.rsp`, `.resx`),
+  JSON, YAML, Python and shell files, and tracked symbolic links;
+- everything below a project directory, because SDK projects include the files
+  of their directory by default;
+- every path an MSBuild item, property or task parameter names, resolved from
+  its own file and from every project, also through symbolic links and MSBuild
+  escapes; a file name built from a property the repository sets matches its
+  values, or every file when a script or workflow sets it;
+- every declared path that a tracked non-documentation file names: its path,
+  its file name, or its stem or a directory as a quoted or separated path part
+  (`Path.Combine(root, "docs")`, `root / "docs"`, `<DocDir>docs</DocDir>`).
+  Markdown files and URLs are not searched.
+
+A miss cannot publish anything untested: every release run runs every gate
+again, and a CI run on a push to `main`, as in the example below, is always
+`full`, so a broken build shows up right after the merge. In MySql, SafeMigrations
+and NestedSet today, contract tests and release tools read `docs/`, so only
+files such as `CODE_OF_CONDUCT.md` or `CONTRIBUTING.md` stay `docs`.
 
 ```json
 {
@@ -330,6 +348,9 @@ name: CI
 
 on:
   pull_request:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read

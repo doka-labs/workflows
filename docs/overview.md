@@ -158,7 +158,7 @@ version must have the major of its line.
 
 ```mermaid
 flowchart LR
-  pr(["pull_request"]) --> scope["change-scope<br/>git diff from base to merge commit,<br/>docs or full"]
+  pr(["pull_request"]) --> scope["change-scope<br/>git diff from base to merge commit;<br/>docs only for declared paths that no build input<br/>and no tracked non-documentation file names"]
   pr --> lint["workflow-lint"]
   pr --> check["release-policy-check<br/>PR base is a line of the policy on main,<br/>checkout's policy valid, toolchain fits the base line,<br/>dependabot.yml equals rendered"]
   pr --> review["dependency-review"]
