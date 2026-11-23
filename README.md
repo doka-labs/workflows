@@ -579,3 +579,19 @@ jobs:
       NUGET_USER: ${{ secrets.NUGET_USER }}
 ```
 
+## Community and support
+
+The organization-wide policies apply to this repository:
+
+- [Support channels and safe diagnostic sharing](https://github.com/doka-labs/.github/blob/main/SUPPORT.md)
+- [Contributing](https://github.com/doka-labs/.github/blob/main/CONTRIBUTING.md)
+- [Code of Conduct](https://github.com/doka-labs/.github/blob/main/CODE_OF_CONDUCT.md)
+- [Security policy and private vulnerability reporting](https://github.com/doka-labs/.github/blob/main/SECURITY.md)
+- [Governance and responsibilities](https://github.com/doka-labs/.github/blob/main/GOVERNANCE.md)
+
+## License
+
+The workflows and tools are MIT-licensed. See [LICENSE](LICENSE). The
+[Code of Conduct](https://github.com/doka-labs/.github/blob/main/CODE_OF_CONDUCT.md#attribution)
+is separately licensed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
