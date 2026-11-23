@@ -42,6 +42,27 @@ output directories carried the NuGet HTTP cache into audit evidence and, in
 one repository, about 53 GB of uncompressed EF migration bundles into CI
 evidence within 14 days.
 
+## Releasing this repository
+
+A version of this repository is released in three steps:
+
+1. Move the entries under `## [Unreleased]` in `CHANGELOG.md` into a dated
+   section `## [<version>] - <YYYY-MM-DD>` and merge it to `main`.
+2. Wait for the Self Check of the merge commit, then tag that commit with an
+   SSH-signed annotated tag and push it:
+   `git tag -s v<version> <commit> -m "v<version>"` and
+   `git push origin v<version>`. Only administrators can create tags.
+3. `release.yml` runs on the tag. It requires GitHub to verify the tag's
+   signature, the tagged commit to lie on `main` and its Self Check to have
+   passed (it waits up to 20 minutes for a running one), takes the notes from
+   the version's `CHANGELOG.md` section and publishes the immutable release.
+   It then waits for GitHub's release attestation and checks it with
+   `gh release verify`. A rerun of the same tag only verifies the published
+   release.
+
+Immutable releases are enforced by the organization. The job token cannot read
+that setting, so a release that does not become immutable makes the run fail.
+
 ## Workflows
 
 ### `dependency-audit.yml`

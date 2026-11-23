@@ -1,0 +1,50 @@
+name: Release
+
+# Publishes the immutable GitHub release of this repository when a maintainer
+# pushes the signed tag v<version>: the tag must be verified by GitHub and lie
+# on main, the Self Check of that commit must have passed, and the notes come
+# from the version's CHANGELOG.md section.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+# WHY: Releases of all tags run one after another and are never cancelled midway: each run reads the current Latest
+# before it sets its own, so two tags pushed together cannot leave the lower version Latest. queue: max keeps up to
+# 100 waiting runs instead of replacing a pending one.
+# https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  release:
+    name: Release
+    # WHY: contents write lists and creates the release, actions read lists the Self Check runs, attestations read
+    # lets gh release verify read the release attestation.
+    # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    runs-on: ubuntu-26.04
+    # WHY: The tool waits up to 20 minutes for the Self Check of the commit and 5 minutes for the attestation.
+    timeout-minutes: 30
+
+    steps:
+      # WHY: fetch-depth 0 keeps the history that proves the tagged commit belongs to main.
+      - name: Check out the tagged commit with its history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: python3 -E -s -m tools.release_publication self-release --root "$GITHUB_WORKSPACE" --tag "$TAG"

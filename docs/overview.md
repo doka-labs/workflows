@@ -461,8 +461,13 @@ flowchart LR
   change["change in doka-labs/workflows"] --> sc["self-check.yml on pull_request<br/>and push to main"]
   sc --> lint["Lint: workflow-lint.yml via $/"]
   sc --> tests["Tool Tests: unit tests of tools/<br/>with the SDK of global.json"]
-  lint & tests --> merge["merge to main"]
-  merge --> tag["version tag, entry in CHANGELOG.md"]
-  tag --> dep["Dependabot in each product repository<br/>proposes the new SHA and version comment"]
+  lint & tests --> merge["merge to main<br/>with a dated CHANGELOG.md section"]
+  merge --> tag["administrator: SSH-signed annotated tag<br/>v&lt;version&gt; on the merge commit, push"]
+  tag --> rel["release.yml on the tag push"]
+  rel --> r1{"tag verified by GitHub, commit on main,<br/>Self Check of the commit passed?<br/>(waits up to 20 minutes)"}
+  r1 -- no --> rf(["fail, no release"])
+  r1 -- yes --> r2["release with the notes of the<br/>CHANGELOG.md section, Latest when newest"]
+  r2 --> r3["immutable and attested,<br/>checked with gh release verify"]
+  r3 --> dep["Dependabot in each product repository<br/>proposes the new SHA and version comment"]
   dep --> prr["product pull request runs the<br/>reusable workflows at the new SHA"]
 ```
