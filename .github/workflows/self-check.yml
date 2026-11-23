@@ -27,12 +27,6 @@ jobs:
     name: Lint
     uses: $/.github/workflows/workflow-lint.yml
 
-  # WHY: The pull request author becomes its assignee with the workflow this repository offers.
-  assign:
-    permissions:
-      pull-requests: write
-    uses: $/.github/workflows/pr-assign.yml
-
   tests:
     name: Tool Tests
     runs-on: ubuntu-26.04

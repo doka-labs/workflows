@@ -1,0 +1,21 @@
+name: Pull Request
+
+# Housekeeping for pull requests of this repository, with the workflow it
+# offers to the product repositories.
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+
+permissions: {}
+
+jobs:
+  # WHY: "$/" is GitHub's self-repository reference: it resolves to this repository at the running commit.
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+  assign:
+    # WHY: The called job adds the author as assignee, which needs pull-requests write.
+    permissions:
+      pull-requests: write
+    uses: $/.github/workflows/pr-assign.yml

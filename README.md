@@ -298,11 +298,28 @@ one artifact and passes the packed version.
 
 ### `pr-assign.yml`
 
-Assigns the author when a pull request is opened or reopened, so lists show
-who drives it. It runs as a job of the CI workflow (see the example below) and
-is skipped on every other run. Bots such as Dependabot are left out, and so
-are pull requests from forks, whose token is read-only. An author who cannot
-be assigned in the repository gets a notice, not a red run.
+Assigns the author of a new or reopened pull request, so lists show who
+drives it. Bots such as Dependabot are left out, and so are pull requests from
+forks, whose token is read-only. An author who cannot be assigned in the
+repository gets a notice, not a red run.
+
+```yaml
+name: Pull Request
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+
+permissions: {}
+
+jobs:
+  assign:
+    permissions:
+      pull-requests: write
+    uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v0.1.0
+```
 
 ### Documentation-only changes
 
@@ -366,11 +383,6 @@ permissions:
 jobs:
   scope:
     uses: doka-labs/workflows/.github/workflows/change-scope.yml@<commit-sha> # v0.1.0
-
-  assign:
-    permissions:
-      pull-requests: write
-    uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v0.1.0
 
   style:
     needs: scope

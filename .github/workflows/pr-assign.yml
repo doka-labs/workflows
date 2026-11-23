@@ -1,9 +1,8 @@
 name: PR Assign
 
-# Assigns the author when a pull request is opened or reopened, so lists show
-# who drives it. Call it as a job of the CI workflow; on every other run it is
-# skipped. Bots and pull requests from forks are left alone: no person drives
-# a bot's pull request, and a fork's token is read-only.
+# Assigns the author of a new or reopened pull request, so lists show who
+# drives it. Bots and pull requests from forks are left alone: no person
+# drives a bot's pull request, and a fork's token is read-only.
 
 on:
   workflow_call:
@@ -25,9 +24,7 @@ jobs:
     # requests by people can be assigned.
     # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
     if: >-
-      github.event_name == 'pull_request'
-      && (github.event.action == 'opened' || github.event.action == 'reopened')
-      && github.event.pull_request.user.type != 'Bot'
+      github.event_name == 'pull_request' && github.event.pull_request.user.type != 'Bot'
       && github.event.pull_request.head.repo.full_name == github.repository
     # WHY: Adding assignees needs the "Pull requests" (or "Issues") repository permission with write access.
     # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
