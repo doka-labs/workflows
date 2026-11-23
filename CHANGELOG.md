@@ -23,6 +23,7 @@ release; until then its entries stay under Unreleased.
 - `coverage-gate.yml`: per-assembly and per-class coverage thresholds.
 - `code-style.yml`: warning-level C# style and unnecessary usings.
 - `package-check.yml`: candidate package checks for pull request packages.
+- `pr-assign.yml`: assigns the author of a pull request, bots excluded.
 - `change-scope.yml` and `required-gate.yml`: documentation-only pull
   requests skip the heavy jobs; the release qualification traces them back to
   a fully qualified tree.

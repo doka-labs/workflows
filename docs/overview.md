@@ -31,6 +31,7 @@ flowchart LR
     style["code-style.yml"]
     pkg["package-check.yml"]
     req["required-gate.yml"]
+    assign["pr-assign.yml"]
     check["release-policy-check.yml"]
     review["dependency-review.yml"]
     cov["coverage-gate.yml"]
@@ -45,7 +46,7 @@ flowchart LR
     tools[("tools/ at job.workflow_sha")]
   end
 
-  ci --> scope & lint & check & review & style & pkg & cov & req & prat
+  ci --> scope & lint & check & review & style & pkg & cov & req & prat & assign
   schedule --> coord
   coord -. "workflow_dispatch per active line" .-> workload
   workload --> guard --> audit
@@ -160,6 +161,7 @@ version must have the major of its line.
 flowchart LR
   pr(["pull_request"]) --> scope["change-scope<br/>git diff from base to merge commit;<br/>docs only for declared paths that no build input<br/>and no tracked non-documentation file names"]
   pr --> lint["workflow-lint"]
+  pr --> assign["pr-assign<br/>author as assignee,<br/>not for bots or forks"]
   pr --> check["release-policy-check<br/>PR base is a line of the policy on main,<br/>checkout's policy valid, toolchain fits the base line,<br/>dependabot.yml equals rendered"]
   pr --> review["dependency-review"]
   scope -- full --> heavy["code-style, product build and tests,<br/>package-check, coverage-gate"]
