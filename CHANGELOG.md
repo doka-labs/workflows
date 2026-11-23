@@ -5,6 +5,10 @@ or output, a tool's command line, or the schema of a policy file
 (`.github/release-policy.json`, `.github/coverage-policy.json`). Callers pin a
 commit SHA with the version as a comment; Dependabot updates both.
 
+The first version is 0.1.0. A version is the tag `v<version>` on a commit of
+`main` whose Self Check passed on GitHub, published as an immutable GitHub
+release; until then its entries stay under Unreleased.
+
 ## [Unreleased]
 
 ### Added

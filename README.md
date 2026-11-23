@@ -92,7 +92,7 @@ entries as this repository's `.github/actionlint.yaml`.
 ```yaml
 jobs:
   workflow-lint:
-    uses: doka-labs/workflows/.github/workflows/workflow-lint.yml@<commit-sha> # v0.4.0
+    uses: doka-labs/workflows/.github/workflows/workflow-lint.yml@<commit-sha> # v0.1.0
 ```
 
 ### `dependency-review.yml`
@@ -172,7 +172,7 @@ it from the repository's CI:
 ```yaml
 jobs:
   release-policy:
-    uses: doka-labs/workflows/.github/workflows/release-policy-check.yml@<commit-sha> # v0.2.0
+    uses: doka-labs/workflows/.github/workflows/release-policy-check.yml@<commit-sha> # v0.1.0
 ```
 
 ### `release-lines-coordinator.yml`
@@ -207,7 +207,7 @@ jobs:
     permissions:
       contents: read
       actions: write
-    uses: doka-labs/workflows/.github/workflows/release-lines-coordinator.yml@<commit-sha> # v0.2.0
+    uses: doka-labs/workflows/.github/workflows/release-lines-coordinator.yml@<commit-sha> # v0.1.0
     with:
       workload: audit
 ```
@@ -248,7 +248,7 @@ permissions:
 
 jobs:
   guard:
-    uses: doka-labs/workflows/.github/workflows/release-line-guard.yml@<commit-sha> # v0.2.0
+    uses: doka-labs/workflows/.github/workflows/release-line-guard.yml@<commit-sha> # v0.1.0
     with:
       maintenance: ${{ inputs.maintenance || false }}
       schedule-correlation: ${{ inputs.schedule-correlation || '' }}
@@ -257,7 +257,7 @@ jobs:
   dependency-audit:
     needs: guard
     if: needs.guard.outputs.proceed == 'true'
-    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.2.0
+    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.1.0
 ```
 
 ### `coverage-gate.yml`
@@ -352,7 +352,7 @@ jobs:
     permissions:
       contents: write
       attestations: read
-    uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v0.1.0
     with:
       version: ${{ inputs.version }}
       qualification-only: ${{ inputs.qualification-only }}
@@ -372,7 +372,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-qualification.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/release-qualification.yml@<commit-sha> # v0.1.0
     with:
       version: ${{ inputs.version }}
       qualification-only: ${{ inputs.qualification-only }}
@@ -386,7 +386,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-candidate.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/release-candidate.yml@<commit-sha> # v0.1.0
     with:
       version: ${{ inputs.version }}
       packages-artifact: packages
@@ -399,7 +399,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-publish.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/release-publish.yml@<commit-sha> # v0.1.0
     with:
       tag: ${{ needs.preflight.outputs.tag }}
     secrets:
