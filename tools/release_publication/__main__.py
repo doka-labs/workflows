@@ -13,7 +13,7 @@ from tools.release_lines.coordinator import observe_authority
 from tools.release_lines.toolchain import target_frameworks
 from tools.release_lines.github import GitHub, GitHubError
 from tools.release_lines.policy import PolicyError
-from tools.release_publication import consumers, nuget, packages, publication
+from tools.release_publication import consumers, nuget, packages, publication, self_release
 
 
 def _output(name: str, value: str) -> None:
@@ -94,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
     readback.add_argument("--candidate", type=Path, required=True)
     readback.add_argument("--work", type=Path, required=True)
     readback.add_argument("--root", type=Path, required=True, help="Product checkout whose global.json is used.")
+    own = commands.add_parser("self-release", help="Publish this repository's release of a signed version tag.")
+    own.add_argument("--root", type=Path, required=True)
+    own.add_argument("--tag", required=True)
     release = commands.add_parser("publish-release")
     release.add_argument("--root", type=Path, required=True)
     release.add_argument("--candidate", type=Path, required=True)
@@ -191,6 +194,13 @@ def main(argv: list[str] | None = None) -> int:
             attestation.write_predicate(args.output / "admission.json", publication.admission(manifest, environment))
             _output("admission", str(args.output / "admission.json"))
             print(f"Admitted {manifest['tag']} at {manifest['commit']}.")
+            return 0
+
+        # WHY: self-release has no candidate, so it runs before the candidate check of the commands below.
+        if args.command == "self-release":
+            result = self_release.release(api, args.root.resolve(), environment["GITHUB_REPOSITORY"], args.tag)
+            _summary(f"## Released {result['tag']}\n\n{result['url']}")
+            print(f"Released {result['tag']} at {result['commit']}: {result['url']}")
             return 0
 
         manifest = publication.verify_candidate(environment["GITHUB_REPOSITORY"], args.candidate.resolve())
