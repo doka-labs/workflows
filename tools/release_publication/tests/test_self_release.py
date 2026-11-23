@@ -323,11 +323,23 @@ class SelfReleaseTests(unittest.TestCase):
 
 
 class SelfReleaseCommandTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name).resolve()
+        self.summary = self.root / "summary.md"
+        self.output = self.root / "output.txt"
+
+    def tearDown(self):
+        self.directory.cleanup()
+
     def run_command(self, release):
-        with tempfile.TemporaryDirectory() as directory, \
-                unittest.mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": REPOSITORY}), \
+        # WHY: On GitHub the job's own GITHUB_STEP_SUMMARY and GITHUB_OUTPUT are set; the command must write into
+        # files of this test, or the Tool Tests summary shows a release that never happened.
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_STEP_SUMMARY": str(self.summary),
+                       "GITHUB_OUTPUT": str(self.output)}
+        with unittest.mock.patch.dict(os.environ, environment, clear=True), \
                 unittest.mock.patch.object(self_release, "release", release):
-            return cli.main(["self-release", "--root", directory, "--tag", TAG]), Path(directory).resolve()
+            return cli.main(["self-release", "--root", str(self.root), "--tag", TAG])
 
     def test_command_releases_the_tag(self):
         # Arrange
@@ -338,11 +350,13 @@ class SelfReleaseCommandTests(unittest.TestCase):
             return {"tag": tag, "commit": COMMIT, "url": "https://example.invalid"}
 
         # Act
-        code, root = self.run_command(release)
+        code = self.run_command(release)
 
         # Assert
         self.assertEqual(0, code)
-        self.assertEqual([(root, REPOSITORY, TAG)], calls)
+        self.assertEqual([(self.root, REPOSITORY, TAG)], calls)
+        self.assertEqual("## Released v0.1.0\n\nhttps://example.invalid\n", self.summary.read_text(encoding="utf-8"))
+        self.assertFalse(self.output.exists())
 
     def test_command_reports_a_failed_release(self):
         # Arrange
@@ -351,10 +365,11 @@ class SelfReleaseCommandTests(unittest.TestCase):
 
         # Act
         with unittest.mock.patch("sys.stderr"):
-            code, _ = self.run_command(release)
+            code = self.run_command(release)
 
         # Assert
         self.assertEqual(1, code)
+        self.assertFalse(self.summary.exists())
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
