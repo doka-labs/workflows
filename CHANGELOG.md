@@ -12,6 +12,10 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+### Added
+
+- MIT license, the same as in the other Doka Labs repositories.
+
 ## [0.1.0] - 2026-11-23
 
 ### Added
