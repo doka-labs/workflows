@@ -11,6 +11,8 @@ release; until then its entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-23
+
 ### Added
 
 - `dependency-audit.yml`: audit of every project file for known direct and
