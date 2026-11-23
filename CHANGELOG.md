@@ -16,6 +16,12 @@ entries stay under Unreleased.
 
 - MIT license, the same as in the other Doka Labs repositories.
 
+### Fixed
+
+- The CI example in the README calls `release-pr-attestation.yml` with
+  `always()`, so documentation-only pull requests are attested as the release
+  qualification requires.
+
 ## [0.1.0] - 2026-11-23
 
 ### Added
