@@ -441,10 +441,22 @@ jobs:
       results: ${{ toJSON(needs) }}
       scope: ${{ needs.scope.outputs.scope }}
       skippable: '["style", "build", "packages"]'
+
+  attest:
+    needs: required
+    # WHY: Without always(), the jobs skipped for a docs change would skip this job too.
+    if: always() && github.event_name == 'pull_request' && needs.required.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    uses: doka-labs/workflows/.github/workflows/release-pr-attestation.yml@<commit-sha> # v0.1.0
 ```
 
 The required check is then `required / Required`. `release-pr-attestation.yml`
-attests the scope with the tree of the base commit. The release qualification
+runs after the gate on every pull request, also a `docs` one, and attests the
+scope with the tree of the base commit. The release qualification
 accepts a `docs` attestation only by walking back through those base trees to
 a `full` one of the same workflow and line, recomputing every step with
 `git diff` and the candidate's policy; the release run itself runs every gate
