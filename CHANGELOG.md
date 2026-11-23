@@ -19,6 +19,11 @@ release; until then its entries stay under Unreleased.
   exceptions.
 - `workflow-lint.yml`: actionlint, zizmor and shellcheck.
 - `coverage-gate.yml`: per-assembly and per-class coverage thresholds.
+- `code-style.yml`: warning-level C# style and unnecessary usings.
+- `package-check.yml`: candidate package checks for pull request packages.
+- `change-scope.yml` and `required-gate.yml`: documentation-only pull
+  requests skip the heavy jobs; the release qualification traces them back to
+  a fully qualified tree.
 - Release lines: `release-policy-check.yml`, `release-lines-coordinator.yml`,
   `release-line-guard.yml`.
 - Qualification: `release-pr-attestation.yml`, `release-qualification.yml`.

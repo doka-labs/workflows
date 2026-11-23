@@ -53,11 +53,15 @@ jobs:
       tree: ${{ steps.qualify.outputs.tree }}
 
     steps:
+      # WHY: A documentation-only pull request qualification is traced back through earlier trees to a full one,
+      # and each step is recomputed with git diff, which needs those trees. fetch-depth 0 "indicates all history for
+      # all branches and tags". https://github.com/actions/checkout/blob/v7.0.1/action.yml
       - name: Check out the candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           path: repository
+          fetch-depth: 0
 
       # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
       # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise

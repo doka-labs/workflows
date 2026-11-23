@@ -47,6 +47,14 @@ def main(argv: list[str] | None = None) -> int:
     sbom.add_argument("--tool", type=Path, required=True)
     sbom.add_argument("--supplier", required=True)
     sbom.add_argument("--output", type=Path, required=True)
+    check = commands.add_parser("package-check", help="Check pull request packages like a candidate; no writes.")
+    check.add_argument("--root", type=Path, required=True)
+    check.add_argument("--version", required=True)
+    check.add_argument("--packages", type=Path, required=True)
+    check.add_argument("--probes", type=Path, required=True)
+    check.add_argument("--tool", type=Path, required=True)
+    check.add_argument("--supplier", required=True)
+    check.add_argument("--output", type=Path, required=True)
     public = commands.add_parser("public-consumers")
     public.add_argument("--root", type=Path, required=True)
     public.add_argument("--candidate", type=Path, required=True)
@@ -111,6 +119,19 @@ def main(argv: list[str] | None = None) -> int:
             result = consumers.generate(args.packages.resolve(), inventory, args.version, args.tool.resolve(),
                                         root / "global.json", environment["GITHUB_REPOSITORY"], args.supplier,
                                         args.output.resolve())
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
+        if args.command == "package-check":
+            root, directory = args.root.resolve(), args.packages.resolve()
+            repository = environment["GITHUB_REPOSITORY"]
+            policy = observe_authority(api, repository)["policy"]
+            inventory, _ = publication.check_packages(policy, root, directory, args.version, repository,
+                                                      environment["GITHUB_SHA"], args.probes.resolve())
+            # WHY: The same isolated consumers and SBOM checks as the candidate: the candidate bytes restore
+            # unchanged, no test or build tooling leaks into the graph, and every SBOM validates.
+            result = consumers.generate(directory, inventory, args.version, args.tool.resolve(),
+                                        root / "global.json", repository, args.supplier, args.output.resolve())
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
 

@@ -1442,5 +1442,33 @@ class PreTagDraftTests(unittest.TestCase):
         self.assertIn("No SBOM attestation", str(raised.exception))
 
 
+class PackageCheckCommandTests(unittest.TestCase):
+    def test_pull_request_packages_get_the_candidate_checks_without_writes(self):
+        # Arrange
+        from tools.release_publication import __main__ as cli
+
+        mock = unittest.mock
+        root = Path(tempfile.mkdtemp())
+        inventory = [{"id": "Doka.Core"}]
+        api = RecordingFakeApi({})
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": COMMIT}
+
+        # Act
+        with mock.patch.dict(cli.os.environ, environment, clear=True), \
+                mock.patch.object(cli, "GitHub", return_value=api), \
+                mock.patch.object(cli, "observe_authority", return_value={"policy": {"release": {}}}), \
+                mock.patch.object(publication, "check_packages", return_value=(inventory, [])) as check, \
+                mock.patch.object(cli.consumers, "generate", return_value={"Doka.Core": "ok"}) as generate:
+            code = cli.main(["package-check", "--root", str(root), "--version", "1.2.3-ci.5", "--packages",
+                             str(root / "packages"), "--probes", str(root / "probes.json"), "--tool",
+                             str(root / "sbom-tool"), "--supplier", "Doka Labs", "--output", str(root / "logs")])
+
+        # Assert
+        self.assertEqual(0, code)
+        self.assertEqual(("1.2.3-ci.5", REPOSITORY, COMMIT), check.call_args.args[3:6])
+        self.assertEqual(inventory, generate.call_args.args[1])
+        self.assertEqual([], api.calls)
+
+
 if __name__ == "__main__":
     unittest.main()

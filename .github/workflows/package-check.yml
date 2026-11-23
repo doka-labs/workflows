@@ -1,0 +1,104 @@
+name: Package Check
+
+# Checks the packages a pull request builds the way release-candidate.yml
+# checks a candidate: identity, repository and commit binding, target
+# frameworks, Portable PDBs, isolated consumers restoring the exact bytes, and
+# validated SBOMs. It writes nothing outside the job.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Package version the caller's build job packed.
+        type: string
+        required: true
+      packages-artifact:
+        description: Artifact of this run with every .nupkg and its .snupkg.
+        type: string
+        required: true
+      sbom-supplier:
+        description: Supplier named in the SBOMs.
+        type: string
+        default: Doka Labs
+      runs-on:
+        description: Runner label for the package job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: Packages
+    # WHY: actions read downloads this run's packages artifact; contents read reads the release policy on main.
+    permissions:
+      contents: read
+      actions: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: NestedSet's consumer and SBOM jobs took at most 1.1 and 1.2 minutes in 15
+    # successful runs; building the symbol tool adds about one minute.
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head.
+      - name: Check out the release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: repository/global.json
+
+      - name: Download the packages
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.packages-artifact }}
+          path: ${{ runner.temp }}/packages
+
+      # WHY: sbom-tool 4.1.5 is the release NestedSet runs and the newest release; the self-contained binary needs
+      # no tool installation, and the digest is the one GitHub reports for the release asset.
+      # https://github.com/microsoft/sbom-tool/releases/tag/v4.1.5
+      - name: Install sbom-tool 4.1.5
+        env:
+          SHA256: bf5d4f99bc98c119d549d08fc02ae92598a7a42772f17317c01031a92632e05b
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom-tool"
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/sbom-tool/sbom-tool" \
+            https://github.com/microsoft/sbom-tool/releases/download/v4.1.5/sbom-tool-linux-x64
+          echo "$SHA256  $RUNNER_TEMP/sbom-tool/sbom-tool" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/sbom-tool/sbom-tool"
+
+      - name: Verify the Portable PDBs and derive symbol probes
+        run: >-
+          dotnet run --project .workflows/tools/NuGetSymbols/NuGetSymbols.csproj --configuration Release --
+          --packages "$RUNNER_TEMP/packages" --output "$RUNNER_TEMP/symbol-probes.json"
+
+      # WHY: Component detection and NuGet write scratch files to TMPDIR, and the self-contained binary may extract
+      # its runtime; both stay in the job's temp directory (NestedSet's generate-sbom.sh).
+      - name: Check the packages, restore isolated consumers and validate the SBOMs
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SUPPLIER: ${{ inputs.sbom-supplier }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/sbom-scratch" "$RUNNER_TEMP/sbom-bundle"
+          TMPDIR="$RUNNER_TEMP/sbom-scratch" DOTNET_BUNDLE_EXTRACT_BASE_DIR="$RUNNER_TEMP/sbom-bundle" \
+            python3 -E -s -m tools.release_publication package-check --root "$GITHUB_WORKSPACE/repository" \
+            --version "$VERSION" --packages "$RUNNER_TEMP/packages" --probes "$RUNNER_TEMP/symbol-probes.json" \
+            --tool "$RUNNER_TEMP/sbom-tool/sbom-tool" --supplier "$SUPPLIER" --output "$RUNNER_TEMP/sbom-logs"

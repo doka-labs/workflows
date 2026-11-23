@@ -27,6 +27,10 @@ flowchart LR
 
   subgraph helper["doka-labs/workflows"]
     lint["workflow-lint.yml"]
+    scope["change-scope.yml"]
+    style["code-style.yml"]
+    pkg["package-check.yml"]
+    req["required-gate.yml"]
     check["release-policy-check.yml"]
     review["dependency-review.yml"]
     cov["coverage-gate.yml"]
@@ -41,7 +45,7 @@ flowchart LR
     tools[("tools/ at job.workflow_sha")]
   end
 
-  ci --> lint & check & review & cov & prat
+  ci --> scope & lint & check & review & style & pkg & cov & req & prat
   schedule --> coord
   coord -. "workflow_dispatch per active line" .-> workload
   workload --> guard --> audit
@@ -56,6 +60,7 @@ flowchart LR
   subgraph files["Files in the product repository"]
     rp[".github/release-policy.json"]
     cp[".github/coverage-policy.json"]
+    cs[".github/change-scope.json"]
     dt[".github/dependabot-template.yml"]
     dy[".github/dependabot.yml (rendered)"]
     as[".github/allowed_signers"]
@@ -78,6 +83,7 @@ flowchart LR
 
   rp --> check2["release-policy-check, coordinator, guard,<br/>preflight, qualification, candidate, publish"]
   cp --> cov2["coverage-gate"]
+  cs --> sc2["change-scope, release-pr-attestation,<br/>release-qualification"]
   dt & dy --> check2
   as --> pub2["publish, pre-tag"]
   cl --> pre2["preflight, candidate"]
@@ -152,18 +158,23 @@ version must have the major of its line.
 
 ```mermaid
 flowchart LR
-  pr(["pull_request"]) --> lint["workflow-lint"]
+  pr(["pull_request"]) --> scope["change-scope<br/>git diff from base to merge commit,<br/>docs or full"]
+  pr --> lint["workflow-lint"]
   pr --> check["release-policy-check<br/>PR base is a line of the policy on main,<br/>checkout's policy valid, toolchain fits the base line,<br/>dependabot.yml equals rendered"]
   pr --> review["dependency-review"]
-  pr --> gates["product jobs<br/>build, tests, packages"]
-  gates --> cov["coverage-gate"]
-  gates --> qg["gate jobs of qualification.gates<br/>(protected-check)"]
-  qg --> prat["release-pr-attestation<br/>checkout is the tested merge commit,<br/>every gate job of this run succeeded"]
-  prat --> att[("pr-qualification-v1<br/>subject: git-tree-&lt;tree&gt;.txt")]
+  scope -- full --> heavy["code-style, product build and tests,<br/>package-check, coverage-gate"]
+  scope -- docs --> docs["the repository's documentation checks"]
+  heavy --> req["required-gate<br/>every needed job succeeded, or skipped<br/>for docs and listed in skippable"]
+  docs --> req
+  scope --> req
+  req --> prat["release-pr-attestation<br/>checkout is the tested merge commit,<br/>gate jobs succeeded, scope and base tree recomputed"]
+  prat --> att[("pr-qualification-v1<br/>subject: git-tree-&lt;tree&gt;.txt,<br/>scope docs or full")]
 ```
 
 The attestation is what a later release of a commit with the same tree relies
-on; it does not expire like an artifact.
+on; it does not expire like an artifact. A required check whose workflow a path
+filter skips stays pending, so the CI workflow always starts and only its jobs
+are skipped.
 
 ## 6. Checks of every change in detail
 
@@ -285,7 +296,7 @@ flowchart TB
 flowchart TB
   q1["checkout tree equals the run's commit tree"] --> q2["freeze the line from the policy on main<br/>(snapshot, qualificationOnly for prepared lines)"]
   q2 --> q3{"protected-check gates?"}
-  q3 -- yes --> q4["verify pr-qualification-v1 for this tree<br/>into this line; every protected gate succeeded"]
+  q3 -- yes --> q4["verify pr-qualification-v1 for this tree, line and workflow;<br/>scope docs: walk back through baseTree to a full one,<br/>recompute every step with git diff (at most 50);<br/>every protected gate succeeded in the full one"]
   q3 -- no --> q5
   q4 --> q5{"candidate-produced gates?"}
   q5 -- yes --> q6["those jobs of this run succeeded"]

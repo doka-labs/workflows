@@ -12,14 +12,18 @@ import hashlib
 import json
 import re
 import subprocess
+import tempfile
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
+from tools.change_scope import scope as change_scope
 from tools.dependency_audit.audit import source_projects
 from tools.release_lines import attestation
 from tools.release_lines import policy as policies
 from tools.release_lines.github import GitHubError
 
+# WHY: A bound against an endless walk; each step is one merged documentation-only pull request.
+MAX_DOCUMENTATION_CHAIN = 50
 TRX_FAILURES = ("failed", "error", "timeout", "aborted", "passedButRunAborted", "notRunnable", "disconnected")
 TRX_FAILED_OUTCOMES = ("Failed", "Error", "Timeout", "Aborted")
 TRX_NAMESPACE = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
@@ -107,10 +111,18 @@ def pr_predicate(api, policy: dict, environment: dict, event: dict, root: Path) 
 
     gates = require_gate_jobs(run_jobs(api, policy["repository"], environment["GITHUB_RUN_ID"]), names)
     tree = git_tree(root, merge)
+    base_sha = pull.get("base", {}).get("sha", "")
+    # WHY: The scope is computed here from the tested merge commit and its base, not taken from the caller, so a
+    # documentation-only attestation always means a change the release qualification can recompute.
+    try:
+        scope = change_scope.classify(root, base_sha, merge)["scope"]
+    except change_scope.ScopeError as error:
+        raise QualificationError(f"Cannot classify the pull request change: {error}") from error
+
     return tree, {"schemaVersion": 1, "repository": policy["repository"], "pullRequest": pull.get("number"),
-                  "baseRef": base, "baseSha": pull.get("base", {}).get("sha"),
+                  "baseRef": base, "baseSha": base_sha, "baseTree": git_tree(root, base_sha),
                   "headSha": pull.get("head", {}).get("sha"), "mergeCommit": merge, "tree": tree,
-                  "workflow": path, "gates": gates}
+                  "workflow": path, "scope": scope, "gates": gates}
 
 
 def restore_projects(root: Path) -> None:
@@ -290,6 +302,40 @@ def check_tests(trx_files: list[Path], projects: dict[str, str], skip_projects: 
     return [{"assembly": name, **item} for name, item in sorted(summary.items())]
 
 
+def documentation_chain(root: Path, repository: str, tree: str, source_ref: str, workflow: str, *,
+                        verify=attestation.verify) -> tuple[dict, list[str]]:
+    """Return the full pull request qualification behind the tree and the documentation-only trees on the way."""
+    chain, current = [], tree
+    with tempfile.TemporaryDirectory(prefix="pr-chain-") as directory:
+        for _ in range(MAX_DOCUMENTATION_CHAIN):
+            subject = attestation.tree_subject(Path(directory), current)
+            pr = verify_pr_qualification(subject, repository, current, source_ref, workflow, verify=verify)
+            scope = pr["predicate"].get("scope")
+            if scope == "full":
+                return pr, chain
+
+            base = pr["predicate"].get("baseTree")
+            if scope != "docs" or not isinstance(base, str):
+                raise QualificationError(f"The pull request qualification of {current} has no valid scope.")
+
+            # WHY: The documentation-only claim is recomputed from the trees with this checkout's policy and MSBuild
+            # files; .github/** and MSBuild files are never documentation, so a step cannot change either.
+            try:
+                result = change_scope.classify(root, base, current)
+            except change_scope.ScopeError as error:
+                raise QualificationError(f"Cannot compare {base} with {current}: {error}") from error
+
+            if result["scope"] != "docs":
+                raise QualificationError(f"The change from {base} to {current} is not documentation only: "
+                                         f"{', '.join(result['nonDocumentation'])}.")
+
+            chain.append(current)
+            current = base
+
+    raise QualificationError(f"More than {MAX_DOCUMENTATION_CHAIN} documentation-only pull requests follow the last "
+                             "fully qualified tree.")
+
+
 def verify_pr_qualification(subject: Path, repository: str, tree: str, source_ref: str, workflow: str, *,
                             verify=attestation.verify) -> dict:
     """Return the newest qualification of the tree by the workflow for a pull request into the line."""
@@ -328,14 +374,15 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
             protected.setdefault(gate["workflow"], []).append(gate["name"])
 
     for workflow, names in sorted(protected.items()):
-        pr = verify_pr_qualification(subject, repository, tree, source_ref, workflow, verify=verify)
+        pr, chain = documentation_chain(root, repository, tree, source_ref, workflow, verify=verify)
         attested = {gate["name"] for gate in pr["predicate"].get("gates", []) if gate.get("conclusion") == "success"}
         missing = sorted(set(names) - attested)
         if missing:
             raise QualificationError(f"The pull request qualification of {workflow} lacks gates: {', '.join(missing)}.")
 
         gates.extend({"name": name, "kind": "protected-check", "workflow": workflow, "runId": pr["runId"],
-                      "attempt": pr["attempt"], "pullRequest": pr["predicate"].get("pullRequest")} for name in names)
+                      "attempt": pr["attempt"], "pullRequest": pr["predicate"].get("pullRequest"),
+                      "tree": pr["predicate"].get("tree"), "documentationTrees": chain} for name in names)
 
     produced = [gate["name"] for gate in policy["qualification"]["gates"] if gate["kind"] == "candidate-produced"]
     foreign = sorted(gate["name"] for gate in policy["qualification"]["gates"]

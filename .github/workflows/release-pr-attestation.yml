@@ -43,6 +43,23 @@ jobs:
           persist-credentials: false
           path: repository
 
+      # WHY: Checkout removes its credentials, and GitHub "may temporarily require authentication for some clones
+      # and fetches of public repositories over HTTPS"; NestedSet's publication failed with HTTP 403 on such a read
+      # (run 44952104737). The helper lends the job token to Git without storing it.
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      - name: Authenticate Git reads with the job token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh auth setup-git --hostname github.com
+
+      # WHY: The scope of the attestation is the difference between the tested merge commit and its base; the
+      # shallow checkout holds only the merge commit.
+      - name: Fetch the pull request base
+        working-directory: repository
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+
       # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
       # with -E -s from their own checkout: -I would also drop the working directory, which "python -m" otherwise
       # puts first on sys.path. https://docs.python.org/3/using/cmdline.html

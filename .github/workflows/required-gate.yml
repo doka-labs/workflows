@@ -1,0 +1,61 @@
+name: Required Gate
+
+# The aggregate check a branch ruleset requires. It passes only when every job
+# the caller needs succeeded, or was skipped for a documentation-only change and
+# is listed in skippable. Call it with `if: always()` so it also reports when a
+# needed job failed.
+
+on:
+  workflow_call:
+    inputs:
+      results:
+        description: toJSON(needs) of the calling job.
+        type: string
+        required: true
+      scope:
+        description: Output of change-scope.yml; full when the caller does not classify changes.
+        type: string
+        default: full
+      skippable:
+        description: JSON list of needed jobs that a documentation-only change may skip.
+        type: string
+        default: "[]"
+      runs-on:
+        description: Runner label for the gate job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  required:
+    name: Required
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: the job only reads its inputs.
+    timeout-minutes: 5
+
+    steps:
+      # WHY: The tool comes from the same commit as this workflow, not from a branch head.
+      - name: Check out the gate tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      # WHY: "A job that is skipped will report its status as Success" even for a required check, so a skipped job
+      # passes only here, by name and for a documentation-only change. The inputs travel through the environment,
+      # never into the script. https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-jobs-with-conditions
+      - name: Require every needed job
+        working-directory: .workflows
+        env:
+          GATE_RESULTS: ${{ inputs.results }}
+          GATE_SKIPPABLE: ${{ inputs.skippable }}
+          GATE_SCOPE: ${{ inputs.scope }}
+        run: python3 -E -s -m tools.change_scope gate --scope "$GATE_SCOPE"

@@ -1,0 +1,80 @@
+name: Change Scope
+
+# Classifies a pull request as documentation only (scope docs) or full
+# (scope full) by the caller's .github/change-scope.json. Every other event is
+# full. Callers skip their heavy jobs with
+# `if: needs.<job>.outputs.scope == 'full'` and judge the result with
+# required-gate.yml.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the scope job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+    outputs:
+      scope:
+        description: docs or full.
+        value: ${{ jobs.scope.outputs.scope }}
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    name: Scope
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: the job compares two commits and reads the MSBuild files.
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.classify.outputs.scope }}
+
+    steps:
+      - name: Check out the tested commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      # WHY: Checkout removes its credentials, and GitHub "may temporarily require authentication for some clones
+      # and fetches of public repositories over HTTPS"; NestedSet's publication failed with HTTP 403 on such a read
+      # (run 44952104737). The helper lends the job token to Git without storing it.
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      - name: Authenticate Git reads with the job token
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh auth setup-git --hostname github.com
+
+      # WHY: For pull_request, the checkout is "the merge commit on the merge branch"; its difference to the base
+      # is exactly what the pull request changes. The shallow checkout holds only the merge commit.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+      - name: Fetch the pull request base
+        if: github.event_name == 'pull_request'
+        working-directory: repository
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+
+      # WHY: The tool comes from the same commit as this workflow, not from a branch head.
+      - name: Check out the change-scope tool
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Classify the change
+        id: classify
+        working-directory: .workflows
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 -E -s -m tools.change_scope classify --root "$GITHUB_WORKSPACE/repository"
+          --base "$BASE_SHA" --head "$GITHUB_SHA"

@@ -421,7 +421,8 @@ class GateBindingTests(unittest.TestCase):
 
         def verify(subject, repository, predicate_type):
             return [{"predicate": {"tree": TREE, "repository": "doka-labs/Example", "baseRef": "refs/heads/main",
-                                   "workflow": workflow, "gates": [{"name": name, "conclusion": "success"}
+                                   "workflow": workflow, "scope": "full",
+                                   "gates": [{"name": name, "conclusion": "success"}
                                                                    for name in names]},
                      "runId": index + 1, "attempt": 1} for index, (workflow, names) in enumerate(attested)]
 
@@ -480,6 +481,106 @@ class GateBindingTests(unittest.TestCase):
 
         # Assert
         self.assertEqual(1, result["gates"])
+
+
+class DocumentationChainTests(unittest.TestCase):
+    TREES = {"t3": "c" * 40, "t2": "b" * 40, "t1": "a" * 40}
+
+    def chain(self, predicates, classified):
+        from unittest import mock
+
+        def verify(subject, repository, predicate_type):
+            tree = subject.read_text(encoding="ascii").strip()
+            return [{"predicate": {"tree": tree, "repository": "doka-labs/Example", "baseRef": "refs/heads/main",
+                                   "workflow": CI, **predicates[tree]}, "runId": 1, "attempt": 1}]
+
+        with mock.patch.object(qualification.change_scope, "classify",
+                               side_effect=lambda root, base, head: classified[(base, head)]):
+            return qualification.documentation_chain(Path("."), "doka-labs/Example", self.TREES["t3"],
+                                                     "refs/heads/main", CI, verify=verify)
+
+    def test_documentation_steps_lead_to_the_full_qualification(self):
+        # Arrange
+        t1, t2, t3 = self.TREES["t1"], self.TREES["t2"], self.TREES["t3"]
+        predicates = {t3: {"scope": "docs", "baseTree": t2}, t2: {"scope": "docs", "baseTree": t1},
+                      t1: {"scope": "full"}}
+        docs = {"scope": "docs", "nonDocumentation": []}
+
+        # Act
+        pr, chain = self.chain(predicates, {(t2, t3): docs, (t1, t2): docs})
+
+        # Assert
+        self.assertEqual((t1, [t3, t2]), (pr["predicate"]["tree"], chain))
+
+    def test_recomputed_code_change_fails(self):
+        # Arrange
+        t2, t3 = self.TREES["t2"], self.TREES["t3"]
+        predicates = {t3: {"scope": "docs", "baseTree": t2}, t2: {"scope": "full"}}
+        code = {"scope": "full", "nonDocumentation": ["src/Code.cs"]}
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.chain(predicates, {(t2, t3): code})
+
+        # Assert
+        self.assertIn("not documentation only: src/Code.cs", str(raised.exception))
+
+    def test_qualification_without_scope_fails(self):
+        # Arrange
+        predicates = {self.TREES["t3"]: {}}
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.chain(predicates, {})
+
+        # Assert
+        self.assertIn("has no valid scope", str(raised.exception))
+
+
+class PrPredicateScopeTests(unittest.TestCase):
+    def test_predicate_records_the_scope_and_base_tree(self):
+        # Arrange
+        import os
+        import subprocess
+        from unittest import mock
+
+        environment = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+
+        def git(*arguments):
+            return subprocess.run(["git", "-C", str(root), "-c", "user.email=t@example.invalid", "-c", "user.name=T",
+                                   *arguments], capture_output=True, text=True, check=True, env=environment
+                                  ).stdout.strip()
+
+        git("init", "-q")
+        (root / ".github").mkdir()
+        (root / ".github" / "change-scope.json").write_text(
+            '{"schemaVersion": 1, "documentation": ["docs/**"]}', encoding="utf-8")
+        (root / "docs").mkdir()
+        (root / "docs" / "guide.md").write_text("Guide", encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-q", "-m", "base")
+        base = git("rev-parse", "HEAD")
+        (root / "docs" / "guide.md").write_text("Changed guide", encoding="utf-8")
+        git("commit", "-q", "-am", "docs")
+        merge = git("rev-parse", "HEAD")
+        policy = {"repository": "doka-labs/Example",
+                  "qualification": {"gates": [{"name": "ci / Required", "kind": "protected-check", "workflow": CI}]}}
+        env = {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_SHA": merge, "GITHUB_REPOSITORY": "doka-labs/Example",
+               "GITHUB_WORKFLOW_REF": f"doka-labs/Example/{CI}@refs/pull/7/merge", "GITHUB_RUN_ID": "5"}
+        event = {"pull_request": {"number": 7, "base": {"ref": "main", "sha": base}, "head": {"sha": merge}}}
+        jobs = [{"name": "ci / Required", "status": "completed", "conclusion": "success"}]
+
+        # Act
+        with mock.patch.object(qualification.policies, "check_pr_base"), \
+                mock.patch.object(qualification, "run_jobs", return_value=jobs):
+            tree, predicate = qualification.pr_predicate(None, policy, env, event, root)
+
+        # Assert
+        self.assertEqual(("docs", git("rev-parse", f"{base}^{{tree}}"), tree),
+                         (predicate["scope"], predicate["baseTree"], predicate["tree"]))
 
 
 class EvaluateTests(unittest.TestCase):

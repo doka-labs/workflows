@@ -16,10 +16,12 @@ tree ID of the tested merge commit followed by a newline.
 | `pullRequest` | integer | pull request number |
 | `baseRef` | string | `refs/heads/<base branch>`, a registered release line |
 | `baseSha` | string | base commit of the pull request |
+| `baseTree` | string | tree ID of `baseSha` |
 | `headSha` | string | head commit of the pull request |
 | `mergeCommit` | string | merge commit the run tested (`GITHUB_SHA`) |
 | `tree` | string | tree ID of `mergeCommit`; equals the subject |
 | `workflow` | string | path of the calling CI workflow |
+| `scope` | string | `docs` when `git diff` from `baseSha` to `mergeCommit` changes only documentation by the repository's `.github/change-scope.json`, otherwise `full`; computed by the attesting workflow |
 | `gates` | array | `{name, jobs, conclusion}` of each gate job, `conclusion` is `success` |
 
 This file is not changed after the first release of this repository that

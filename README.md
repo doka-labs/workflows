@@ -277,6 +277,112 @@ threshold with executed lines for every package in `release.packages`.
 }
 ```
 
+## Pull requests
+
+### `code-style.yml`
+
+Restores the solution (`--locked-mode` unless `locked-mode` is `false`) and
+runs the two checks MySql, SafeMigrations and NestedSet run today, without
+changing files: `dotnet format <solution> style --severity warn
+--verify-no-changes --no-restore`, and the same with `--diagnostics IDE0005
+--severity hidden` for unnecessary usings. Whitespace is not checked.
+
+### `package-check.yml`
+
+Checks the packages of a pull request with the candidate's checks, without
+writing anything: package identity and source binding, exactly the packages
+of `release.packages`, Portable PDBs against their assemblies, an isolated
+consumer per package that must restore the exact bytes, and a validated SBOM
+per package. The caller's build job uploads every `.nupkg` and `.snupkg` as
+one artifact and passes the packed version.
+
+### Documentation-only changes
+
+`change-scope.yml` classifies a pull request by `git diff` between its base
+and the tested merge commit. It is `docs` only when every changed path matches
+`.github/change-scope.json` and none of them can reach a build, a test or a
+package; every other change and every other event is `full`. Never
+documentation, whatever the policy lists:
+
+- `.github/**` (the policy itself included), `global.json`, source, MSBuild,
+  JSON, YAML, Python and shell files;
+- everything below a directory with a `.csproj`, because SDK projects include
+  the files of their directory by default;
+- every path an MSBuild item names in `Include` or `Update`, such as a packed
+  `README.md`, and every file of a name built from an unresolved property.
+
+```json
+{
+  "schemaVersion": 1,
+  "documentation": ["docs/**", "CHANGELOG.md", "CONTRIBUTING.md"]
+}
+```
+
+A required check whose workflow is skipped by a path filter stays pending and
+blocks the pull request, so the CI workflow always starts; its heavy jobs are
+skipped for `docs` and `required-gate.yml` is the required check. The gate
+passes when every needed job succeeded, or was skipped for a `docs` change and
+is listed in `skippable`. A repository whose tests read documentation (MySql's
+link and ADR contract tests) keeps those jobs out of `skippable`.
+
+```yaml
+name: CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scope:
+    uses: doka-labs/workflows/.github/workflows/change-scope.yml@<commit-sha> # v0.1.0
+
+  style:
+    needs: scope
+    if: needs.scope.outputs.scope == 'full'
+    uses: doka-labs/workflows/.github/workflows/code-style.yml@<commit-sha> # v0.1.0
+    with:
+      solution: Doka.Example.slnx
+
+  build:
+    needs: scope
+    if: needs.scope.outputs.scope == 'full'
+    runs-on: ubuntu-26.04
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+    steps:
+      - id: pack
+        run: echo "The repository's restore, test and pack steps upload the packages artifact."
+
+  packages:
+    needs: [scope, build]
+    if: needs.scope.outputs.scope == 'full'
+    permissions:
+      contents: read
+      actions: read
+    uses: doka-labs/workflows/.github/workflows/package-check.yml@<commit-sha> # v0.1.0
+    with:
+      version: ${{ needs.build.outputs.version }}
+      packages-artifact: packages
+
+  required:
+    needs: [scope, style, build, packages]
+    if: always()
+    uses: doka-labs/workflows/.github/workflows/required-gate.yml@<commit-sha> # v0.1.0
+    with:
+      results: ${{ toJSON(needs) }}
+      scope: ${{ needs.scope.outputs.scope }}
+      skippable: '["style", "build", "packages"]'
+```
+
+The required check is then `required / Required`. `release-pr-attestation.yml`
+attests the scope with the tree of the base commit. The release qualification
+accepts a `docs` attestation only by walking back through those base trees to
+a `full` one of the same workflow and line, recomputing every step with
+`git diff` and the candidate's policy; the release run itself runs every gate
+again.
+
 ## Releases
 
 One `release-candidate.yml` per product repository, started by

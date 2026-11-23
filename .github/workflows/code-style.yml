@@ -1,0 +1,73 @@
+name: Code Style
+
+# Verifies warning-level C# code style and unnecessary usings of the caller's
+# solution, without changing files. Whitespace is not checked: the repositories
+# format with Rider, whose layouts Roslyn cannot represent.
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution file, relative to the repository root.
+        type: string
+        required: true
+      locked-mode:
+        description: Restore with --locked-mode against the committed lock files.
+        type: boolean
+        default: true
+      runs-on:
+        description: Runner label for the style job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  style:
+    name: Style
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: NestedSet's style job took at most 2.2 minutes in 15 successful runs.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+
+      # WHY: --no-restore below needs restored assets; locked mode uses the committed graph, as NestedSet's style
+      # job does. https://learn.microsoft.com/dotnet/core/tools/dotnet-restore
+      - name: Restore the solution
+        env:
+          SOLUTION: ${{ inputs.solution }}
+          LOCKED: ${{ inputs.locked-mode }}
+        run: |
+          arguments=("$SOLUTION")
+          if [ "$LOCKED" = "true" ]; then
+            arguments+=(--locked-mode)
+          fi
+          dotnet restore "${arguments[@]}"
+
+      # WHY: The same commands in MySql (eng/quality/quality-gates.sh), SafeMigrations and NestedSet: "style
+      # --severity warn" reports actionable style diagnostics, and IDE0005 at hidden severity finds unnecessary
+      # usings; --verify-no-changes fails instead of rewriting.
+      # https://learn.microsoft.com/dotnet/core/tools/dotnet-format
+      - name: Verify warning-level code style
+        env:
+          SOLUTION: ${{ inputs.solution }}
+        run: dotnet format "$SOLUTION" style --severity warn --verify-no-changes --no-restore
+
+      - name: Verify unnecessary usings
+        env:
+          SOLUTION: ${{ inputs.solution }}
+        run: dotnet format "$SOLUTION" style --diagnostics IDE0005 --severity hidden --verify-no-changes --no-restore

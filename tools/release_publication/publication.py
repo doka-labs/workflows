@@ -252,6 +252,26 @@ def preflight(api, environment: dict, root: Path, *, version: str, qualification
     return {"resume": False, "tag": tag}
 
 
+def check_packages(policy: dict, root: Path, directory: Path, version: str, repository: str, commit: str,
+                   probes: Path) -> tuple[list[dict], list[dict]]:
+    """Check identity, source binding, frameworks and Portable PDB probes of the built packages.
+
+    The pull request package check and the candidate run the same checks, so a package problem shows up in the
+    pull request instead of first at a release.
+    """
+    from tools.release_lines.toolchain import target_frameworks
+
+    inventory = packages.inventory(directory, version, repository, commit,
+                                   target_frameworks(root, policy["toolchain"]["coupling"]))
+    require({item["id"] for item in inventory} == set(policy["release"]["packages"]),
+            "The built packages differ from release.packages of the release policy.")
+    symbols = read_json(probes)["probes"]
+    nuget.validate_symbol_probes(symbols)
+    require({probe["package"] for probe in symbols} == {item["nupkg"] for item in inventory},
+            "Every package needs its Portable PDB probes.")
+    return inventory, symbols
+
+
 def candidate(api, environment: dict, root: Path, *, version: str, directory: Path, probes: Path,
               output: Path) -> dict:
     """Check the built packages and SBOMs of the qualified commit and write the candidate assets."""
@@ -260,19 +280,10 @@ def candidate(api, environment: dict, root: Path, *, version: str, directory: Pa
     policy = observe_authority(api, repository)["policy"]
     require_release_workflow(policy, environment)
     policies.select_line(policy, source_ref, version, purpose="qualification")
-    from tools.release_lines.toolchain import target_frameworks
-
-    inventory = packages.inventory(directory, version, repository, commit,
-                                   target_frameworks(root, policy["toolchain"]["coupling"]))
-    require({item["id"] for item in inventory} == set(policy["release"]["packages"]),
-            "The built packages differ from release.packages of the release policy.")
+    inventory, symbols = check_packages(policy, root, directory, version, repository, commit, probes)
     states = nuget.availability(directory, inventory)
     require(all(state["state"] == "absent" for state in states),
             "A package version is already on nuget.org; a new candidate needs an unused version.")
-    symbols = read_json(probes)["probes"]
-    nuget.validate_symbol_probes(symbols)
-    require({probe["package"] for probe in symbols} == {item["nupkg"] for item in inventory},
-            "Every package needs its Portable PDB probes.")
     sboms = {}
     for item in inventory:
         path = directory / f"{item['id']}.spdx.json"
