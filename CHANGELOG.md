@@ -12,6 +12,14 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-24
+
+### Added
+
+- `decision-records.yml`: holds `docs/decisions` to the Doka MADR Enterprise
+  Profile 1.0 with `madr-check` 0.1.0, a container image pinned by digest
+  that runs without network on a read-only checkout.
+
 ## [0.1.1] - 2026-11-24
 
 ### Added
