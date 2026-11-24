@@ -342,6 +342,29 @@ jobs:
     uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v0.1.0
 ```
 
+### `decision-records.yml`
+
+Holds `docs/decisions` to the Doka MADR Enterprise Profile 1.0 with
+`madr-check` 0.1.0, run as the container image
+`ghcr.io/kdominic89/madr-check` pinned by digest, without network and on a
+read-only mount of the checkout: `validate --profile doka` checks every
+record, and `index check --profile doka` fails on a stale or partial generated
+index; a directory without an index passes. The profile is fixed, so a
+repository cannot leave it by changing the keys of its records. The job needs
+`contents: read` only. Decision records are documentation, so the caller runs
+the job for `docs` pull requests too and does not list it as skippable in
+`required-gate.yml`.
+
+The digest sits in a `run` block, which Dependabot does not read; a new
+`madr-check` version is pinned in this workflow by hand and released as a new
+version of this repository.
+
+```yaml
+jobs:
+  decision-records:
+    uses: doka-labs/workflows/.github/workflows/decision-records.yml@<commit-sha> # v0.2.0
+```
+
 ### Documentation-only changes
 
 `change-scope.yml` classifies a pull request by `git diff` between its base

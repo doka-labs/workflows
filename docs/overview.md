@@ -35,6 +35,7 @@ flowchart LR
     check["release-policy-check.yml"]
     review["dependency-review.yml"]
     cov["coverage-gate.yml"]
+    adr["decision-records.yml"]
     prat["release-pr-attestation.yml"]
     coord["release-lines-coordinator.yml"]
     guard["release-line-guard.yml"]
@@ -46,7 +47,7 @@ flowchart LR
     tools[("tools/ at job.workflow_sha")]
   end
 
-  ci --> scope & lint & check & review & style & pkg & cov & req & prat & assign
+  ci --> scope & lint & check & review & style & pkg & cov & adr & req & prat & assign
   schedule --> coord
   coord -. "workflow_dispatch per active line" .-> workload
   workload --> guard --> audit
@@ -164,11 +165,13 @@ flowchart LR
   pr --> assign["pr-assign<br/>author as assignee,<br/>not for bots or forks"]
   pr --> check["release-policy-check<br/>PR base is a line of the policy on main,<br/>checkout's policy valid, toolchain fits the base line,<br/>dependabot.yml equals rendered"]
   pr --> review["dependency-review"]
+  pr --> adr["decision-records<br/>docs/decisions against the Doka profile,<br/>for docs and full scope"]
   scope -- full --> heavy["code-style, product build and tests,<br/>package-check, coverage-gate"]
   scope -- docs --> docs["the repository's documentation checks"]
   heavy --> req["required-gate<br/>every needed job succeeded, or skipped<br/>for docs and listed in skippable"]
   docs --> req
   scope --> req
+  adr --> req
   req --> prat["release-pr-attestation<br/>checkout is the tested merge commit,<br/>gate jobs succeeded, scope and base tree recomputed"]
   prat --> att[("pr-qualification-v1<br/>subject: git-tree-&lt;tree&gt;.txt,<br/>scope docs or full")]
 ```
@@ -388,6 +391,7 @@ flowchart TB
     r4["dependency-audit"]
     r5["release-line-guard"]
     r6["coverage-gate (+ actions: read)"]
+    r7["decision-records"]
   end
   subgraph dispatch["dispatches runs"]
     d1["release-lines-coordinator<br/>actions: write"]

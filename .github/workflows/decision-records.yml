@@ -1,0 +1,45 @@
+name: Decision Records
+
+# Holds the caller's docs/decisions to the Doka MADR Enterprise Profile 1.0:
+# every record validates, and a generated index, where one exists, matches the
+# records. The checker runs as a container pinned by digest, without network,
+# on a read-only mount of the checkout.
+
+on:
+  workflow_call:
+    inputs:
+      runs-on:
+        description: Runner label for the check job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: one image pull and two checks over a few Markdown files.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # WHY: The digest is madr-check 0.1.0. --profile doka is fixed, so a repository cannot leave the profile by changing the keys of its records.
+      # The digest lives in a run block, which Dependabot does not read; a new checker version is pinned here by hand.
+      - name: Hold the decision records to the Doka profile
+        run: |
+          set -euo pipefail
+          image='ghcr.io/kdominic89/madr-check@sha256:6cf72273d511aa00676f48741bc3436e6a00bad82bdf9d84f37b7298137ea888'
+          docker run --rm --network none --volume "${PWD}:/work:ro" \
+            "${image}" validate --profile doka docs/decisions
+          docker run --rm --network none --volume "${PWD}:/work:ro" \
+            "${image}" index check --profile doka docs/decisions
