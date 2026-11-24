@@ -21,6 +21,11 @@ entries stay under Unreleased.
 - The CI example in the README calls `release-pr-attestation.yml` with
   `always()`, so documentation-only pull requests are attested as the release
   qualification requires.
+- `coverage-gate.yml` joins each Cobertura file name with the report's source
+  root before merging. Reports of test projects that instrument a different
+  set of assemblies name the same file differently, so the gate counted those
+  lines twice and measured too little. A report with several source roots now
+  fails, because its relative file names are ambiguous.
 
 ## [0.1.0] - 2026-11-23
 
