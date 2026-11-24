@@ -8,11 +8,15 @@ from tools.coverage import coverage
 NOW = 1_800_000_000
 
 
-def report(lines, assembly="Doka.Core", class_name="Doka.Core.Thing", source="/w/src/Core/Thing.cs", timestamp=NOW):
+def report(lines, assembly="Doka.Core", class_name="Doka.Core.Thing", source="/w/src/Core/Thing.cs", timestamp=NOW,
+           roots=()):
     body = "".join(f'<line number="{number}" hits="{hits}"'
                    + (f' condition-coverage="50% ({cov}/{tot})"' if tot else "") + " />"
                    for number, hits, cov, tot in lines)
-    return (f'<?xml version="1.0"?><coverage timestamp="{timestamp}"><packages><package name="{assembly}"><classes>'
+    sources = "".join(f"<source>{root}</source>" for root in roots)
+    return (f'<?xml version="1.0"?><coverage timestamp="{timestamp}">'
+            + (f"<sources>{sources}</sources>" if roots else "")
+            + f'<packages><package name="{assembly}"><classes>'
             f'<class name="{class_name}" filename="{source}"><lines>{body}</lines></class></classes></package>'
             "</packages></coverage>")
 
@@ -48,6 +52,27 @@ class CoverageTests(unittest.TestCase):
 
         # Assert
         self.assertEqual(["Doka.Core: lines 2/2 (100.00%), branches 2/2 (100.00%)"], summary)
+
+    def test_file_names_relative_to_different_source_roots_merge_by_line(self):
+        # Arrange
+        alone = report([(1, 1, 0, 0), (2, 0, 0, 0)], source="Thing.cs", roots=["/w/src/Core/"])
+        together = report([(1, 0, 0, 0), (2, 1, 0, 0)], source="Core/Thing.cs", roots=["/w/src/"])
+
+        # Act
+        summary = self.verify([alone, together], policy(line=100, branch=None))
+
+        # Assert
+        self.assertEqual(["Doka.Core: lines 2/2 (100.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_several_source_roots_fail(self):
+        # Arrange
+        reports = [report([(1, 1, 0, 0)], source="Core/Thing.cs", roots=["C:/w/src/", "D:/w/src/"])]
+
+        # Act
+        message = self.failure(reports, policy(line=50, branch=None))
+
+        # Assert
+        self.assertIn("several source roots", message)
 
     def test_line_floor_is_enforced(self):
         # Arrange

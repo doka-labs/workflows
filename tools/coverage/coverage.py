@@ -121,10 +121,18 @@ def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tu
             if now - timestamp > policy["evidenceMaxAgeSeconds"]:
                 raise CoverageError(f"{report.name} is older than {policy['evidenceMaxAgeSeconds']} seconds.")
 
+        # WHY: coverlet writes file names relative to the common root of the instrumented files, so a report of one
+        # assembly and a report of two name the same file differently; only the joined path merges. Several roots
+        # (Windows drives) leave a relative name ambiguous.
+        # https://github.com/coverlet-coverage/coverlet/blob/master/src/coverlet.core/Reporters/CoberturaReporter.cs
+        roots = [element.text or "" for element in root.findall("./sources/source")]
+        if len(roots) > 1:
+            raise CoverageError(f"{report.name} has several source roots, so its file names are ambiguous.")
+
         for package in packages:
             lines = merged.setdefault(package.get("name", ""), {})
             for element in package.findall("./classes/class"):
-                source = source_key(element.get("filename", ""))
+                source = source_key("".join(roots) + element.get("filename", ""))
                 # WHY: Only the class's direct lines count; method details can repeat an uneven subset (MySql).
                 for line in element.findall("./lines/line"):
                     key = (source, element.get("name", ""), int(line.get("number", "0")))
