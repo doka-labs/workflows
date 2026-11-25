@@ -36,6 +36,7 @@ flowchart LR
     review["dependency-review.yml"]
     cov["coverage-gate.yml"]
     adr["decision-records.yml"]
+    arch["architecture-document.yml"]
     prat["release-pr-attestation.yml"]
     coord["release-lines-coordinator.yml"]
     guard["release-line-guard.yml"]
@@ -44,14 +45,15 @@ flowchart LR
     qual["release-qualification.yml"]
     cand["release-candidate.yml"]
     pub["release-publish.yml"]
+    api["api-reference.yml"]
     tools[("tools/ at job.workflow_sha")]
   end
 
-  ci --> scope & lint & check & review & style & pkg & cov & adr & req & prat & assign
+  ci --> scope & lint & check & review & style & pkg & cov & adr & arch & req & prat & assign
   schedule --> coord
   coord -. "workflow_dispatch per active line" .-> workload
   workload --> guard --> audit
-  rc --> pre --> qual --> cand --> pub
+  rc --> pre --> qual --> cand --> pub --> api
   helper -. "every job checks out" .-> tools
 ```
 
@@ -166,12 +168,14 @@ flowchart LR
   pr --> check["release-policy-check<br/>PR base is a line of the policy on main,<br/>checkout's policy valid, toolchain fits the base line,<br/>dependabot.yml equals rendered"]
   pr --> review["dependency-review"]
   pr --> adr["decision-records<br/>docs/decisions against the Doka profile,<br/>for docs and full scope"]
+  pr --> arch["architecture-document<br/>docs/architecture.md against the restored code,<br/>for docs and full scope"]
   scope -- full --> heavy["code-style, product build and tests,<br/>package-check, coverage-gate"]
   scope -- docs --> docs["the repository's documentation checks"]
   heavy --> req["required-gate<br/>every needed job succeeded, or skipped<br/>for docs and listed in skippable"]
   docs --> req
   scope --> req
   adr --> req
+  arch --> req
   req --> prat["release-pr-attestation<br/>checkout is the tested merge commit,<br/>gate jobs succeeded, scope and base tree recomputed"]
   prat --> att[("pr-qualification-v1<br/>subject: git-tree-&lt;tree&gt;.txt,<br/>scope docs or full")]
 ```
@@ -276,6 +280,7 @@ flowchart TB
   sbom --> publish
   approve --> publish["release-publish<br/>see 13"]
   publish --> done2(["immutable release, packages on nuget.org"])
+  done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages<br/>for stable releases and before the first stable"]
 ```
 
 ## 10. Preflight
@@ -392,6 +397,7 @@ flowchart TB
     r5["release-line-guard"]
     r6["coverage-gate (+ actions: read)"]
     r7["decision-records"]
+    r8["architecture-document"]
   end
   subgraph dispatch["dispatches runs"]
     d1["release-lines-coordinator<br/>actions: write"]
@@ -405,6 +411,9 @@ flowchart TB
     w1["release-preflight<br/>(only to see drafts) + attestations: read"]
     w2["release-candidate / Candidate<br/>+ id-token, attestations, actions: read"]
     w3["release-publish<br/>+ actions: read, id-token, attestations,<br/>environment approval, secret NUGET_USER"]
+  end
+  subgraph pages["deploys GitHub Pages"]
+    g1["api-reference / Deploy<br/>pages: write, id-token: write,<br/>environment github-pages"]
   end
   w3 --> nuget["nuget.org Trusted Publishing:<br/>OIDC token -> short-lived API key"]
 ```

@@ -47,15 +47,39 @@ class ReleaseNotesTests(unittest.TestCase):
         # Assert
         self.assertEqual("# 1.2.3\n\n- Fixed it.\n", notes)
 
-    def test_parenthesized_date_heading_passes(self):
+    def test_link_references_after_the_oldest_version_stay_out_of_its_notes(self):
         # Arrange
-        text = "## 1.2.3 (2026-11-22)\n\nNotes.\n"
+        text = ("## [Unreleased]\n\n## [1.2.3] - 2026-11-22\n\n- First.\n\n"
+                "[Unreleased]: https://github.com/doka-labs/Example/compare/v1.2.3...HEAD\n"
+                "[1.2.3]: https://github.com/doka-labs/Example/releases/tag/v1.2.3\n")
 
         # Act
         notes = self.notes(text)
 
         # Assert
-        self.assertEqual("# 1.2.3\n\nNotes.\n", notes)
+        self.assertEqual("# 1.2.3\n\n- First.\n", notes)
+
+    def test_section_of_only_link_references_has_no_notes(self):
+        # Arrange
+        text = "## [1.2.3] - 2026-11-22\n\n[1.2.3]: https://github.com/doka-labs/Example/releases/tag/v1.2.3\n"
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.notes(text)
+
+        # Assert
+        self.assertIn("no notes", str(raised.exception))
+
+    def test_parenthesized_date_heading_fails(self):
+        # Arrange
+        text = "## 1.2.3 (2026-11-22)\n\nNotes.\n"
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            self.notes(text)
+
+        # Assert
+        self.assertIn("exactly one dated section for 1.2.3", str(raised.exception))
 
     def test_missing_section_fails(self):
         # Arrange
@@ -1247,37 +1271,6 @@ class PublishCurrentDraftTests(unittest.TestCase):
         self.assertIn(("PATCH", f"repos/{REPOSITORY}/releases/7"), api.calls)
 
 
-class PreTagImmutableTests(unittest.TestCase):
-    def check(self, routes):
-        originals = (publication.repository_of, publication.release_notes)
-        publication.repository_of = lambda root: REPOSITORY
-        publication.release_notes = lambda root, version: "notes"
-        try:
-            publication.pre_tag(FakeApi(routes), Path("."), "1.2.3")
-        finally:
-            publication.repository_of, publication.release_notes = originals
-
-    def test_disabled_setting_stops(self):
-        # Arrange
-        routes = {f"repos/{REPOSITORY}/immutable-releases": {"enabled": False, "enforced_by_owner": False}}
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            self.check(routes)
-
-        # Assert
-        self.assertIn("Immutable releases are not enabled", str(raised.exception))
-
-    def test_not_found_setting_stops(self):
-        # Arrange
-        routes = {}
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            self.check(routes)
-
-        # Assert
-        self.assertIn("Immutable releases are not enabled", str(raised.exception))
 class StageWithoutDigestTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -1387,13 +1380,19 @@ class ProbeConsistencyTests(unittest.TestCase):
         self.assertIn("expect different bytes at one URL", str(raised.exception))
 
 
-class PreTagDraftTests(unittest.TestCase):
-    def run_pre_tag(self, failure=None):
+class PreTagReportTests(unittest.TestCase):
+    def run_pre_tag(self, *, immutable=None, status="", gpg_format="ssh", repository=REPOSITORY, failure=None):
         from unittest import mock
 
-        commands = {("status",): "", ("branch",): "main\n", ("rev-parse",): f"{COMMIT}\n", ("config",): "ssh\n"}
+        commands = {("status",): status, ("branch",): "main\n", ("rev-parse",): f"{COMMIT}\n"}
         manifest = json.dumps({"commit": COMMIT, "version": "1.2.3"}).encode()
         checked = []
+        config = {"gpg.format": gpg_format, "user.signingkey": "key::ssh-ed25519 K"}
+
+        def origin(root):
+            if repository is None:
+                raise publication.PublicationError("origin is not a GitHub repository.")
+            return repository
 
         def complete(api, repository, release, verify=None):
             checked.append(release["id"])
@@ -1401,8 +1400,9 @@ class PreTagDraftTests(unittest.TestCase):
                 raise failure
 
         patches = {
-            "repository_of": lambda root: REPOSITORY, "release_notes": lambda root, version: "notes",
+            "repository_of": origin, "release_notes": lambda root, version: "notes",
             "run": lambda command, **kwargs: commands[(command[3],)],
+            "git_config": lambda root, key: config[key],
             "observe_authority": lambda api, repository: {"policy": {"release": {"packages": ["Doka.Core"]}}},
             "protected_head": lambda api, repository, ref: COMMIT, "tag_exists": lambda api, repository, tag: False,
             "tags_on_commit": lambda root, commit: [],
@@ -1410,16 +1410,20 @@ class PreTagDraftTests(unittest.TestCase):
             "release_assets": lambda api, repository, release: {publication.CANDIDATE: {"id": 1, "size": 1}},
             "asset_bytes": lambda repository, asset: manifest, "require_complete_draft": complete,
             "signing_key_registered": lambda root, key: True}
-        api = FakeApi({f"repos/{REPOSITORY}/immutable-releases": {"enabled": True}})
+        routes = {} if immutable == "missing" else {
+            f"repos/{REPOSITORY}/immutable-releases": {"enabled": immutable is None}}
         with mock.patch.multiple(publication, **patches), \
                 mock.patch.object(publication.policies, "select_line", return_value={}), \
-                mock.patch.object(publication.subprocess, "run", return_value=mock.Mock(stdout="key::ssh-ed25519 K")), \
                 mock.patch.object(publication.nuget, "unused", return_value={"Doka.Core": "absent"}):
-            result = publication.pre_tag(api, Path("."), "1.2.3")
+            result = publication.pre_tag(FakeApi(routes), Path("."), "1.2.3")
 
         return result, checked
 
-    def test_complete_draft_gets_the_tag_command(self):
+    @staticmethod
+    def failed(result):
+        return {item["subject"]: item["detail"] for item in result["checks"] if not item["ok"]}
+
+    def test_passing_checks_report_every_check_and_the_tag_command(self):
         # Arrange
         expected = f'git tag -s v1.2.3 {COMMIT} -m "v1.2.3"'
 
@@ -1427,19 +1431,111 @@ class PreTagDraftTests(unittest.TestCase):
         result, checked = self.run_pre_tag()
 
         # Assert
+        self.assertEqual(list(publication.PRE_TAG_CHECKS), [item["subject"] for item in result["checks"]])
+        self.assertEqual(0, result["failures"])
         self.assertEqual(expected, result["command"])
         self.assertEqual([7], checked)
+
+    def test_disabled_immutable_releases_fail_with_a_remedy_and_the_other_checks_still_run(self):
+        # Arrange
+        subject = "Immutable releases"
+
+        # Act
+        result, checked = self.run_pre_tag(immutable="disabled")
+
+        # Assert
+        self.assertEqual({subject}, set(self.failed(result)))
+        self.assertIn("Immutable releases are not enabled", self.failed(result)[subject])
+        self.assertIn("Enable immutable releases", self.failed(result)[subject])
+        self.assertNotIn("command", result)
+        self.assertEqual([7], checked)
+
+    def test_missing_immutable_setting_fails(self):
+        # Arrange
+        subject = "Immutable releases"
+
+        # Act
+        result, _ = self.run_pre_tag(immutable="missing")
+
+        # Assert
+        self.assertIn("Immutable releases are not enabled", self.failed(result)[subject])
+
+    def test_independent_failures_are_all_reported(self):
+        # Arrange
+        expected = {"Clean checkout", "SSH signing format"}
+
+        # Act
+        result, _ = self.run_pre_tag(status=" M README.md\n", gpg_format="openpgp")
+
+        # Assert
+        self.assertEqual(expected, set(self.failed(result)))
+        self.assertEqual(2, result["failures"])
+        self.assertIn("Run: git config gpg.format ssh", self.failed(result)["SSH signing format"])
+
+    def test_failed_input_marks_its_dependent_checks_as_not_checked(self):
+        # Arrange
+        dependent = {"Immutable releases", "Protected line head", "Tag unused", "No other tag on the commit",
+                     "Version unused on nuget.org", "Draft holds this commit's candidate",
+                     "Draft passes publish verification"}
+
+        # Act
+        result, checked = self.run_pre_tag(repository=None)
+
+        # Assert
+        failed = self.failed(result)
+        self.assertEqual({"Origin repository", *dependent}, set(failed))
+        self.assertTrue(all(failed[name].startswith("Not checked: needs ") for name in dependent))
+        self.assertEqual([], checked)
+        self.assertEqual(len(publication.PRE_TAG_CHECKS), len(result["checks"]))
 
     def test_draft_failing_verification_gets_no_tag_command(self):
         # Arrange
         failure = publication.PublicationError("The draft of v1.2.3 cannot be published (No SBOM attestation).")
 
         # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            self.run_pre_tag(failure)
+        result, _ = self.run_pre_tag(failure=failure)
 
         # Assert
-        self.assertIn("No SBOM attestation", str(raised.exception))
+        self.assertIn("No SBOM attestation", self.failed(result)["Draft passes publish verification"])
+        self.assertNotIn("command", result)
+
+
+class PreTagCommandTests(unittest.TestCase):
+    def report(self, failures):
+        from tools.release_publication import __main__ as cli
+
+        checks = [{"subject": name, "ok": True, "detail": ""} for name in publication.PRE_TAG_CHECKS]
+        if failures:
+            checks[3] = {"subject": checks[3]["subject"], "ok": False, "detail": "The checkout has changes."}
+        result = {"tag": "v1.2.3", "commit": COMMIT, "checks": checks, "failures": failures}
+        if not failures:
+            result["command"] = f'git tag -s v1.2.3 {COMMIT} -m "v1.2.3"'
+        return cli._pre_tag_report(result)
+
+    def test_failed_report_names_the_failure_and_forbids_the_tag(self):
+        # Arrange
+        failures = 1
+
+        # Act
+        text = self.report(failures)
+
+        # Assert
+        self.assertIn("  FAIL  Clean checkout", text)
+        self.assertIn(f"1 of {len(publication.PRE_TAG_CHECKS)} checks failed", text)
+        self.assertIn("do not create the tag", text)
+        self.assertNotIn("git tag -s", text)
+
+    def test_passing_report_prints_the_tag_and_push_commands(self):
+        # Arrange
+        failures = 0
+
+        # Act
+        text = self.report(failures)
+
+        # Assert
+        self.assertEqual(len(publication.PRE_TAG_CHECKS), text.count("\n  OK    "))
+        self.assertIn(f'  git tag -s v1.2.3 {COMMIT} -m "v1.2.3"', text)
+        self.assertIn("  git push origin v1.2.3", text)
 
 
 class PackageCheckCommandTests(unittest.TestCase):

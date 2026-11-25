@@ -1,0 +1,75 @@
+name: Architecture Document
+
+# Holds the caller's docs/architecture.md to its code: every diagram and table
+# the document carries and as-built owns must match what the code says, and
+# every "`A` does not use `B`" item must hold. The checker runs as a container
+# pinned by digest, without network, on read-only mounts of the restored
+# checkout and its package folder.
+
+on:
+  workflow_call:
+    inputs:
+      solution:
+        description: Solution file, relative to the repository root.
+        type: string
+        required: true
+      locked-mode:
+        description: Restore with --locked-mode against the committed lock files.
+        type: boolean
+        default: true
+      runs-on:
+        description: Runner label for the check job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: restoring Tabular took under a minute and the check under half a minute.
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: global.json
+
+      # WHY: as-built tells a call into a package from any other name only once the package's assemblies can be
+      # read; restore records where they are in obj/project.assets.json. Without it nothing fails, and the document
+      # is held to less than the code says.
+      - name: Restore the solution
+        env:
+          SOLUTION: ${{ inputs.solution }}
+          LOCKED: ${{ inputs.locked-mode }}
+        run: |
+          arguments=("$SOLUTION")
+          if [ "$LOCKED" = "true" ]; then
+            arguments+=(--locked-mode)
+          fi
+          dotnet restore "${arguments[@]}"
+
+      # WHY: The digest is as-built-dotnet 0.1.0. project.assets.json names absolute paths, so the checkout and the
+      # package folder are mounted at the paths the restore wrote. The digest lives in a run block, which Dependabot
+      # does not read; a new checker version is pinned here by hand.
+      - name: Hold the architecture document to the code
+        run: |
+          set -euo pipefail
+          image='ghcr.io/kdominic89/as-built-dotnet@sha256:67acbabae5a3d0d299c9697d82f4b5fe3108c3bc478a5f78c5e1bdf565759720'
+          packages="$(dotnet nuget locals global-packages --list | sed -n 's/^global-packages: //p')"
+          [ -d "$packages" ] || { echo "::error::the NuGet package folder '$packages' does not exist"; exit 1; }
+          docker run --rm --network none \
+            --volume "${PWD}:${PWD}:ro" --volume "${packages}:${packages}:ro" --workdir "${PWD}" \
+            "${image}" check docs/architecture.md

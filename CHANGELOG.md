@@ -12,6 +12,31 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
+### Added
+
+- `api-reference.yml`: after a publication, builds the API reference of the
+  shipped packages and the documents under `docs/` with DocFX 2.81.0 from the
+  released tag and deploys it to GitHub Pages. A pre-release replaces the site
+  only while no stable release exists. The navigation follows a fixed format
+  of `docs/README.md` and lists the decision records from the index that
+  `madr-check` writes.
+- `architecture-document.yml`: restores the solution and holds
+  `docs/architecture.md` to the code with `as-built-dotnet` 0.1.0, a container
+  image pinned by digest, without network and on read-only mounts.
+
+### Changed
+
+- The release preflight accepts only the Keep a Changelog heading
+  `## [X.Y.Z] - YYYY-MM-DD`; the form `## X.Y.Z (YYYY-MM-DD)` now fails.
+  The link reference definitions at the end of the file stay out of the
+  release notes of the oldest version.
+- `decision-records.yml` runs `madr-check` 0.1.1.
+- `pre-tag` runs every check, also after a failure, and prints one `OK` or
+  `FAIL` line per check with a remedy, the number of failed checks, and the
+  tag and push commands when all pass. It exits with 1 when a check failed.
+
 ## [0.2.0] - 2026-11-24
 
 ### Added

@@ -29,11 +29,11 @@ NOTES = "release-notes.md"
 PROBES = "symbol-probes.json"
 ALLOWED_SIGNERS = ".github/allowed_signers"
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
-# WHY: Two heading forms are in use: Keep a Changelog "## [X.Y.Z] - YYYY-MM-DD" (MySql, SafeMigrations) and
-# "## X.Y.Z (YYYY-MM-DD)" (NestedSet). https://keepachangelog.com/en/1.1.0/
-HEADING = re.compile(r"^## (?:\[(?P<a>[^\]]+)\] - (?P<a_date>[0-9]{4}-[0-9]{2}-[0-9]{2})"
-                     r"|(?P<b>\S+) \((?P<b_date>[0-9]{4}-[0-9]{2}-[0-9]{2})\))[ \t]*$", re.MULTILINE)
+# WHY: Every Doka repository uses the Keep a Changelog heading "## [X.Y.Z] - YYYY-MM-DD".
+# https://keepachangelog.com/en/1.1.0/
+HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\] - (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[ \t]*$", re.MULTILINE)
 WILDCARD = re.compile(r"[*?\[]")
+LINK_REFERENCES = re.compile(r"(?:^\[[^\]\n]+\]: \S+[ \t]*(?:\n|\Z)|^[ \t]*\n)+\Z", re.MULTILINE)
 
 
 class PublicationError(RuntimeError):
@@ -82,16 +82,19 @@ def read_json(path: Path) -> dict:
 def release_notes(root: Path, version: str) -> str:
     """Return the notes of the version's single dated changelog section."""
     text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    headings = [match for match in HEADING.finditer(text) if (match["a"] or match["b"]) == version]
+    headings = [match for match in HEADING.finditer(text) if match["version"] == version]
     require(len(headings) == 1, f"CHANGELOG.md needs exactly one dated section for {version}.")
     match = headings[0]
     try:
-        date.fromisoformat(match["a_date"] or match["b_date"])
+        date.fromisoformat(match["date"])
     except ValueError as error:
         raise PublicationError(f"CHANGELOG.md has an invalid date for {version}.") from error
 
     following = re.search(r"^## ", text[match.end():], re.MULTILINE)
-    body = text[match.end():match.end() + following.start() if following else len(text)].strip()
+    body = text[match.end():match.end() + following.start() if following else len(text)]
+    # WHY: Keep a Changelog ends the file with link reference definitions, which follow the oldest version's section;
+    # they link the headings and are not notes. https://keepachangelog.com/en/1.1.0/
+    body = LINK_REFERENCES.sub("", body).strip()
     require(bool(body), f"CHANGELOG.md has no notes for {version}.")
     return f"# {version}\n\n{body}\n"
 
@@ -760,46 +763,144 @@ def require_immutable_releases(api, repository: str) -> None:
             f"Immutable releases are not enabled for {repository}, or the token cannot read the setting.")
 
 
+PRE_TAG_CHECKS = (
+    "Changelog section", "Origin repository", "Immutable releases", "Clean checkout", "Protected line head",
+    "Tag unused", "No other tag on the commit", "Version unused on nuget.org", "Draft holds this commit's candidate",
+    "Draft passes publish verification", "SSH signing format", "Signing key configured", "Signing key allowed",
+)
+
+
+def git_config(root: Path, key: str) -> str:
+    """Return a Git configuration value of the checkout, or an empty string when it is not set."""
+    return subprocess.run(["git", "-C", str(root), "config", "--get", key], capture_output=True, text=True,
+                          timeout=30, check=False).stdout.strip()
+
+
 def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attestation.verify) -> dict:
-    """Check locally, without any write, that the checkout can be tagged for the version (NestedSet's pre_tag)."""
-    repository = repository_of(root)
-    release_notes(root, version)
-    require_immutable_releases(api, repository)
+    """Check locally, without any write, that the checkout can be tagged; every check runs and reports a line."""
+    # WHY: The maintainer runs this before the irreversible tag. Stopping at the first failure hid the others and
+    # cost one run per problem; every check reports OK or FAIL with a remedy, and a check whose input failed reports
+    # what it waits for instead of being skipped silently (MySql eng/release/pre-tag-check.sh).
+    checks: list[dict] = []
+    state: dict = {"tag": f"v{version}"}
 
-    require(not run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]).strip(),
-            "The checkout is not clean.")
-    branch = run(["git", "-C", str(root), "branch", "--show-current"]).strip()
-    source_ref = f"refs/heads/{branch}"
-    policy = observe_authority(api, repository)["policy"]
-    policies.select_line(policy, source_ref, version, purpose="publication")
-    commit = run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
-    require(protected_head(api, repository, source_ref) == commit,
-            f"The checkout is not the current head of the protected {branch}.")
-    tag = f"v{version}"
-    require(not tag_exists(api, repository, tag), f"{tag} already exists.")
-    others = tags_on_commit(root, commit)
-    require(not others, f"{commit} already carries the tags {', '.join(others)}.")
-    taken = sorted(name for name, state in nuget.unused(policy["release"]["packages"], version, fetcher=fetcher).items()
-                   if state != "absent")
-    require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
-    release = release_for(api, repository, tag)
-    require(release is not None and release.get("draft") is True, f"No draft release holds a candidate for {tag}.")
-    # WHY: The tag must point at the commit the draft's candidate was built from (NestedSet).
-    asset = release_assets(api, repository, release).get(CANDIDATE)
-    require(asset is not None, f"The draft of {tag} has no {CANDIDATE}.")
-    manifest = json.loads(asset_bytes(repository, asset))
+    def check(subject: str, action, remedy: str, *needs: str) -> None:
+        missing = [need for need in needs if need not in state]
+        if missing:
+            checks.append({"subject": subject, "ok": False, "detail": f"Not checked: needs {', '.join(missing)}."})
+            return
 
-    require(manifest.get("commit") == commit and manifest.get("version") == version,
-            f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")
-    # WHY: Once pushed, a tag blocks a new candidate for its version (preflight refuses a tag without a release), so
-    # the draft must already pass the verification the publish job runs: every asset, the provenance and exactly
-    # the SBOMs attested. A draft that fails here is deleted and rebuilt before anything is tagged.
-    require_complete_draft(api, repository, release, verify=verify)
-    # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers.
-    require(run(["git", "-C", str(root), "config", "--get", "gpg.format"]).strip() == "ssh",
-            "Configure SSH signing (git config gpg.format ssh) before tagging.")
-    signing_key = subprocess.run(["git", "-C", str(root), "config", "--get", "user.signingkey"], capture_output=True,
-                                 text=True, timeout=30, check=False).stdout.strip()
-    require(bool(signing_key), "Configure the signing key (git config user.signingkey) before tagging.")
-    require(signing_key_registered(root, signing_key), f"The signing key is not listed in {ALLOWED_SIGNERS}.")
-    return {"tag": tag, "commit": commit, "command": f'git tag -s {tag} {commit} -m "{tag}"'}
+        try:
+            detail = action()
+        except (PublicationError, GitHubError, policies.PolicyError, OSError, ValueError, KeyError) as error:
+            checks.append({"subject": subject, "ok": False, "detail": f"{error} {remedy}".strip()})
+            return
+
+        checks.append({"subject": subject, "ok": True, "detail": detail or ""})
+
+    def changelog() -> str:
+        release_notes(root, version)
+        return f"## [{version}]"
+
+    def origin() -> str:
+        state["repository"] = repository_of(root)
+        return state["repository"]
+
+    def immutable() -> str:
+        require_immutable_releases(api, state["repository"])
+        return "enabled"
+
+    def clean() -> str:
+        require(not run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"]).strip(),
+                "The checkout has uncommitted or untracked files.")
+        return ""
+
+    def line_head() -> str:
+        branch = run(["git", "-C", str(root), "branch", "--show-current"]).strip()
+        require(bool(branch), "The checkout is not on a branch.")
+        source_ref = f"refs/heads/{branch}"
+        policy = observe_authority(api, state["repository"])["policy"]
+        policies.select_line(policy, source_ref, version, purpose="publication")
+        commit = run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
+        require(protected_head(api, state["repository"], source_ref) == commit,
+                f"The checkout is not the current head of the protected {branch}.")
+        state["policy"], state["commit"] = policy, commit
+        return f"{branch} at {commit}"
+
+    def tag_unused() -> str:
+        require(not tag_exists(api, state["repository"], state["tag"]), f"{state['tag']} already exists.")
+        return state["tag"]
+
+    def no_other_tag() -> str:
+        others = tags_on_commit(root, state["commit"])
+        require(not others, f"{state['commit']} already carries the tags {', '.join(others)}.")
+        return ""
+
+    def version_unused() -> str:
+        names = state["policy"]["release"]["packages"]
+        taken = sorted(name for name, found in nuget.unused(names, version, fetcher=fetcher).items()
+                       if found != "absent")
+        require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
+        return ", ".join(names)
+
+    def draft_candidate() -> str:
+        release = release_for(api, state["repository"], state["tag"])
+        require(release is not None and release.get("draft") is True,
+                f"No draft release holds a candidate for {state['tag']}.")
+        # WHY: The tag must point at the commit the draft's candidate was built from (NestedSet).
+        asset = release_assets(api, state["repository"], release).get(CANDIDATE)
+        require(asset is not None, f"The draft of {state['tag']} has no {CANDIDATE}.")
+        manifest = json.loads(asset_bytes(state["repository"], asset))
+        require(manifest.get("commit") == state["commit"] and manifest.get("version") == version,
+                f"The draft's candidate was built from {manifest.get('commit')}, not from {state['commit']}.")
+        state["release"] = release
+        return f"draft {release.get('id')}"
+
+    def draft_verified() -> str:
+        # WHY: Once pushed, a tag blocks a new candidate for its version (preflight refuses a tag without a release),
+        # so the draft must already pass the verification the publish job runs: every asset, the provenance and
+        # exactly the SBOMs attested. A draft that fails here is deleted and rebuilt before anything is tagged.
+        require_complete_draft(api, state["repository"], state["release"], verify=verify)
+        return ""
+
+    def signing_format() -> str:
+        # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers.
+        require(git_config(root, "gpg.format") == "ssh", "gpg.format is not ssh.")
+        return "ssh"
+
+    def signing_key() -> str:
+        key = git_config(root, "user.signingkey")
+        require(bool(key), "user.signingkey is not set.")
+        state["signing_key"] = key
+        return ""
+
+    def signing_allowed() -> str:
+        require(signing_key_registered(root, state["signing_key"]), f"The key is not listed in {ALLOWED_SIGNERS}.")
+        return ALLOWED_SIGNERS
+
+    check("Changelog section", changelog, f"Add the section ## [{version}] - YYYY-MM-DD to CHANGELOG.md and merge it.")
+    check("Origin repository", origin, "Run the command in a checkout whose origin is the GitHub repository.")
+    check("Immutable releases", immutable, "Enable immutable releases in the organization settings.",
+          "repository")
+    check("Clean checkout", clean, "Commit, stash, or remove the changes.")
+    check("Protected line head", line_head, "Check out the release line and pull its current head.", "repository")
+    check("Tag unused", tag_unused, "Choose the next version.", "repository")
+    check("No other tag on the commit", no_other_tag, "Release from a commit that carries no version tag.", "commit")
+    check("Version unused on nuget.org", version_unused, "Choose the next version.", "policy")
+    check("Draft holds this commit's candidate", draft_candidate,
+          "Start the release candidate for this commit and wait for it.", "repository", "commit")
+    check("Draft passes publish verification", draft_verified, "Delete the draft and start the candidate again.",
+          "release")
+    check("SSH signing format", signing_format, "Run: git config gpg.format ssh")
+    check("Signing key configured", signing_key, "Run: git config user.signingkey <path to the public key>")
+    check("Signing key allowed", signing_allowed, f"Add the public key to {ALLOWED_SIGNERS} on the release line.",
+          "signing_key")
+    # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
+    require([item["subject"] for item in checks] == list(PRE_TAG_CHECKS), "The pre-tag check did not complete.")
+
+    failures = sum(not item["ok"] for item in checks)
+    result = {"tag": state["tag"], "commit": state.get("commit"), "checks": checks, "failures": failures}
+    if not failures:
+        result["command"] = f'git tag -s {state["tag"]} {state["commit"]} -m "{state["tag"]}"'
+
+    return result

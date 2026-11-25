@@ -1,0 +1,147 @@
+name: API Reference
+
+# Builds the API reference of the shipped packages and the documents under
+# docs/ with DocFX from the released tag, and publishes the site on the
+# repository's GitHub Pages. A stable release always replaces the site; a
+# pre-release replaces it only while no stable release exists. The site is
+# built for every release, so a broken document fails the run even when the
+# site is kept.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Released tag, v<version>.
+        type: string
+        required: true
+      runs-on:
+        description: Runner label for the build job.
+        type: string
+        # WHY: The newest generally available GitHub-hosted Ubuntu image.
+        # https://github.com/actions/runner-images/issues/14747
+        default: ubuntu-26.04
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: restoring the shipped projects and building the site take a few minutes.
+    timeout-minutes: 20
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+          path: repository
+
+      # WHY: The tools come from the same commit as this workflow, not from a branch head. They run as a package
+      # with -E -s from their own checkout. https://docs.python.org/3/using/cmdline.html
+      - name: Check out the site tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      # WHY: DocFX loads the projects through MSBuildWorkspace, which needs the SDK the repository builds with.
+      # https://dotnet.github.io/docfx/docs/dotnet-api-docs.html
+      - name: Set up the repository's .NET SDK
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          global-json-file: repository/global.json
+
+      # WHY: DocFX 2.81.0 is the newest release; the Linux archive carries its own .NET runtime, and the digest is
+      # the one GitHub reports for the release asset. The project publishes no attestation for it.
+      # https://github.com/dotnet/docfx/releases/tag/v2.81.0
+      - name: Install DocFX 2.81.0
+        env:
+          SHA256: 6d20feb116665518e85794db00935f39cacf9d812134cd0d0e4134218f7c5510
+        run: |
+          mkdir -p "$RUNNER_TEMP/docfx"
+          curl --fail --silent --show-error --location --retry 3 --proto '=https' --tlsv1.2 \
+            --output "$RUNNER_TEMP/docfx.zip" \
+            https://github.com/dotnet/docfx/releases/download/v2.81.0/docfx-linux-x64-v2.81.0.zip
+          echo "$SHA256  $RUNNER_TEMP/docfx.zip" | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/docfx.zip" -d "$RUNNER_TEMP/docfx"
+
+      - name: Decide whether the release replaces the site
+        id: decide
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag must be v<version>"; exit 1; }
+          python3 -E -s -m tools.api_reference should-deploy --repository "$GITHUB_REPOSITORY" --version "${TAG#v}"
+
+      # WHY: The site lists the records from the index madr-check writes; the digest is madr-check 0.1.1, the same as
+      # in decision-records.yml. The tool needs the .git of the checkout to resolve links and writes as the runner user.
+      - name: Write the decision index
+        if: hashFiles('repository/docs/decisions/*.md') != ''
+        working-directory: repository
+        run: |
+          set -euo pipefail
+          image='ghcr.io/kdominic89/madr-check@sha256:933d050d1e8d7fa00b5b13191a26c19bf40fcbeb0e2a0c4e7e6384548a993a6d'
+          docker run --rm --network none --user "$(id -u):$(id -g)" --volume "${PWD}:/work" \
+            "${image}" index write --profile doka docs/decisions
+
+      - name: Generate the site configuration
+        id: generate
+        working-directory: .workflows
+        run: >-
+          python3 -E -s -m tools.api_reference generate --root "$GITHUB_WORKSPACE/repository"
+          --title "${GITHUB_REPOSITORY#*/}"
+
+      - name: Restore the shipped projects
+        working-directory: repository
+        env:
+          PROJECTS: ${{ steps.generate.outputs.projects }}
+        run: |
+          for project in $PROJECTS; do
+            dotnet restore "$project" -p:ContinuousIntegrationBuild=true
+          done
+
+      # WHY: Warnings fail the build, so a missing XML comment or a broken link never reaches the published site.
+      - name: Build the site
+        working-directory: repository
+        run: '"$RUNNER_TEMP/docfx/docfx" docfx.json --warningsAsErrors'
+
+      - name: Upload the site
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: repository/_site
+
+  deploy:
+    name: Deploy
+    needs: build
+    if: needs.build.outputs.deploy == 'true'
+    # WHY: Deploying to Pages needs pages write and an OIDC token, in the github-pages environment.
+    # https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages
+    permissions:
+      pages: write
+      id-token: write
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 15
+    # WHY: Two releases deploy one after the other; neither cancels a running deployment.
+    concurrency:
+      group: ${{ github.repository }}-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy the site
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
