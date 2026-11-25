@@ -4,6 +4,8 @@ Attestations are signed by the reusable workflow of this repository that
 creates them. `gh attestation verify` therefore checks the signer with
 `--signer-workflow`: when a reusable workflow signs, "that reusable workflow is
 the signer whose identity needs to be validated" (gh attestation verify --help).
+The release admission is the exception: the publish job is defined by the
+product repository's release workflow, so that workflow signs it.
 """
 
 from __future__ import annotations
@@ -29,7 +31,6 @@ SIGNERS = {
     PR_QUALIFICATION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-pr-attestation.yml",
     RELEASE_LINE_SNAPSHOT: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-qualification.yml",
     RELEASE_QUALIFICATION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-qualification.yml",
-    RELEASE_ADMISSION: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-publish.yml",
     SLSA_PROVENANCE: f"{WORKFLOWS_REPOSITORY}/.github/workflows/release-candidate.yml",
 }
 TREE = re.compile(r"[0-9a-f]{40}\Z")
@@ -49,9 +50,24 @@ def tree_subject(directory: Path, tree: str) -> Path:
     return path
 
 
+def release_signer(policy: dict) -> str:
+    """Return the workflow that signs release admissions: the release workflow of the policy's repository.
+
+    WHY: nuget.org Trusted Publishing accepts only a job defined in the product repository, so the publish job runs
+    in its release workflow, and the attestation of that job is signed by the workflow that defines the job.
+    https://docs.github.com/en/actions/reference/security/oidc
+    """
+    return f"{policy['repository']}/{policy['release']['workflowPath']}"
+
+
 def verify(subject: Path, repository: str, predicate_type: str, *, signer: str | None = None,
            source_digest: str | None = None, source_ref: str | None = None, run=subprocess.run) -> list[dict]:
     """Verify all attestations of a subject for a predicate type and return them with run identity and subjects."""
+    # WHY: The release admission has a different signer in every product repository, so no constant names it; a
+    # caller that names none is wrong and stops here with that cause, before gh runs.
+    if signer is None and predicate_type not in SIGNERS:
+        raise GitHubError(f"No signer is known for {predicate_type}; name the signing workflow.", code="failed")
+
     command = ["gh", "attestation", "verify", str(subject), "--repo", repository,
                "--predicate-type", predicate_type, "--signer-workflow", signer or SIGNERS[predicate_type],
                "--deny-self-hosted-runners", "--format", "json"]

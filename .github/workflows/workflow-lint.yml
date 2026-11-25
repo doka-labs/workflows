@@ -70,9 +70,15 @@ jobs:
 
       # WHY: --offline keeps the check deterministic and needs no token; the audits that need the network are
       # covered by rulesets (MySql's reason). https://docs.zizmor.sh/usage/
-      - name: Audit the workflows with zizmor
+      # WHY: Local composite actions under .github/actions run inside the workflows' jobs, so they are audited too.
+      - name: Audit the workflows and local actions with zizmor
         working-directory: repository
-        run: '"$RUNNER_TEMP/zizmor/bin/zizmor" --offline --persona=regular .github/workflows'
+        run: |
+          paths=(.github/workflows)
+          if [ -d .github/actions ]; then
+            paths+=(.github/actions)
+          fi
+          "$RUNNER_TEMP/zizmor/bin/zizmor" --offline --persona=regular "${paths[@]}"
 
       # WHY: shellcheck ships with the hosted runner image (0.11.0 on Ubuntu 26.04), so it is not installed again.
       # https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2604-Readme.md

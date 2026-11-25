@@ -8,12 +8,14 @@ NestedSet; each names its origin.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
 import subprocess
 import tempfile
 import time
+import urllib.request
 from datetime import date
 from pathlib import Path
 from urllib.parse import quote
@@ -33,6 +35,8 @@ MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 # https://keepachangelog.com/en/1.1.0/
 HEADING = re.compile(r"^## \[(?P<version>[^\]]+)\] - (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})[ \t]*$", re.MULTILINE)
 WILDCARD = re.compile(r"[*?\[]")
+# WHY: Any audience serves: the token is read only by this job, which asks the Actions service for it directly.
+JOB_IDENTITY_AUDIENCE = "https://github.com/doka-labs/workflows"
 LINK_REFERENCES = re.compile(r"(?:^\[[^\]\n]+\]: \S+[ \t]*(?:\n|\Z)|^[ \t]*\n)+\Z", re.MULTILINE)
 
 
@@ -565,7 +569,54 @@ def verify_publisher_environment(api, repository: str, policy: dict, environment
         protected_head(api, repository, source_ref)
 
 
-def authorize(api, environment: dict, root: Path, directory: Path, *, verify=attestation.verify) -> dict:
+def job_identity(environment: dict, *, opener=urllib.request.urlopen) -> dict:
+    """Return the claims of this job's OIDC token as the Actions service issues it.
+
+    WHY: The publish job is defined by the product repository, which sets its environment; the shared action cannot
+    set it. The token states the environment the job really runs in and the workflow that defines the job, so the
+    tools check both instead of trusting an input. A run step receives the token through ACTIONS_ID_TOKEN_REQUEST_URL
+    and ACTIONS_ID_TOKEN_REQUEST_TOKEN when the job has id-token write; the claims come straight from the Actions
+    service over HTTPS, so their payload is read without verifying the signature. GitHub describes job_workflow_ref
+    only for jobs of reusable workflows; that a job of the run's own workflow carries that workflow's path there is
+    shown by the Build Signer URI that Fulcio takes from this claim in the attestations of MySql's release runs.
+    https://docs.github.com/en/actions/reference/security/oidc
+    https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md
+    """
+    url, token = environment.get("ACTIONS_ID_TOKEN_REQUEST_URL"), environment.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+    require(bool(url) and bool(token), "The publish job has no OIDC token; grant it id-token: write.")
+    request = urllib.request.Request(f"{url}&audience={quote(JOB_IDENTITY_AUDIENCE, safe='')}",
+                                     headers={"Authorization": f"bearer {token}"})
+    with opener(request, timeout=30) as response:
+        value = json.loads(response.read().decode("utf-8")).get("value", "")
+    parts = value.split(".") if isinstance(value, str) else []
+    require(len(parts) == 3, "The OIDC token of the publish job is malformed.")
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+    require(isinstance(claims, dict), "The OIDC token of the publish job has no claims.")
+    return claims
+
+
+def require_job_identity(policy: dict, claims: dict, source_ref: str) -> str:
+    """Require the policy's environment and release workflow in the job's claims; return the environment.
+
+    WHY: nuget.org Trusted Publishing compares job_workflow_ref with the policy's workflow file in the product
+    repository, so the job that pushes must be defined there and not in a reusable workflow of another repository.
+    https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery.Services/Authentication/Federated/GitHubTokenPolicyValidator.cs
+    """
+    repository, release = policy["repository"], policy["release"]
+    require(claims.get("repository") == repository, f"The publish job runs for {claims.get('repository')}, not {repository}.")
+    expected = f"{repository}/{release['workflowPath']}@{source_ref}"
+    require(claims.get("job_workflow_ref") == expected,
+            f"The publish job is defined by {claims.get('job_workflow_ref')}, not by {expected}; define it in "
+            f"{release['workflowPath']} and call the release-publish action from it.")
+    require(claims.get("environment") == release["environment"],
+            f"The publish job runs in environment '{claims.get('environment') or ''}', not in "
+            f"'{release['environment']}'; set environment: {release['environment']} on the job.")
+    return release["environment"]
+
+
+def authorize(api, environment: dict, root: Path, directory: Path, *, verify=attestation.verify,
+              identity=job_identity) -> dict:
     """Recheck candidate bytes and attestations, authority, environment and signed tag; no writes."""
     repository = environment["GITHUB_REPOSITORY"]
     manifest = verify_candidate(repository, directory, verify=verify)
@@ -573,12 +624,18 @@ def authorize(api, environment: dict, root: Path, directory: Path, *, verify=att
     policy = authority["policy"]
     require_release_workflow(policy, environment)
     policies.select_line(policy, manifest["sourceRef"], manifest["version"], purpose="publication")
-    verify_publisher_environment(api, repository, policy, environment.get("PUBLISHER_ENVIRONMENT", ""))
+    # WHY: The ref after "@" in job_workflow_ref is the ref the run started from, the ref claim that GITHUB_REF names:
+    # Fulcio's Build Signer URI (server_url + job_workflow_ref) of MySql's release run 44620752544, dispatched on
+    # main, reads doka-labs/Doka.EntityFrameworkCore.MySql/.github/workflows/release-candidate.yml@refs/heads/main.
+    # https://github.com/sigstore/fulcio/blob/main/docs/oid-info.md
+    publisher = require_job_identity(policy, identity(environment), environment.get("GITHUB_REF", ""))
+    verify_publisher_environment(api, repository, policy, publisher)
     manifest["tagObject"] = verify_signed_tag(api, root, manifest)
     manifest["authorityCommit"] = authority["commit"]
     # WHY: Earlier admissions, from earlier attempts or runs, must name the same candidate and tag object; a
     # different one would mean two candidates for one version (MySql, SafeMigrations and NestedSet).
-    earlier = (verify(directory / CANDIDATE, repository, attestation.RELEASE_ADMISSION)
+    earlier = (verify(directory / CANDIDATE, repository, attestation.RELEASE_ADMISSION,
+                      signer=attestation.release_signer(policy))
                if attestation.exists(api, repository, directory / CANDIDATE, attestation.RELEASE_ADMISSION) else [])
     require_same_admissions(earlier, manifest)
     return manifest
