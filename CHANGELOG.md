@@ -21,7 +21,8 @@ entries stay under Unreleased.
   released tag and deploys it to GitHub Pages. A pre-release replaces the site
   only while no stable release exists. The navigation follows a fixed format
   of `docs/README.md` and lists the decision records from the index that
-  `madr-check` writes.
+  `madr-check` writes. Links to repository files outside the site point to
+  GitHub at the released tag; the checkout keeps its relative links.
 - `architecture-document.yml`: restores the solution and holds
   `docs/architecture.md` to the code with `as-built-dotnet` 0.1.0, a container
   image pinned by digest, without network and on read-only mounts.

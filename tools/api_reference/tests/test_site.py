@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tools.api_reference import site
 
+REPOSITORY = "doka-labs/Doka.Example"
 EXAMPLE = Path(__file__).resolve().parents[3] / "examples" / "release-policy.json"
 
 INDEX = """# Documentation
@@ -81,12 +82,12 @@ class SiteTests(unittest.TestCase):
             '- name: API reference\n  href: api/\n')
 
         # Act
-        result = site.write(self.root, "Doka.Example")
+        result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
-        self.assertEqual(expected, (self.root / "toc.yml").read_text(encoding="utf-8"))
+        self.assertEqual(expected, (self.root / ".docfx" / "toc.yml").read_text(encoding="utf-8"))
         self.assertEqual(["Tutorials", "Reference"], result["sections"])
-        self.assertEqual("# Doka.Example\n", (self.root / "index.md").read_text(encoding="utf-8"))
+        self.assertEqual("# Doka.Example\n", (self.root / ".docfx" / "index.md").read_text(encoding="utf-8"))
 
     def test_config_builds_the_shipped_projects_with_the_modern_template(self):
         # Arrange
@@ -94,10 +95,10 @@ class SiteTests(unittest.TestCase):
                     "src/Doka.Example.Extensions/Doka.Example.Extensions.csproj"]
 
         # Act
-        result = site.write(self.root, "Doka.Example")
+        result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
-        config = json.loads((self.root / "docfx.json").read_text(encoding="utf-8"))
+        config = json.loads((self.root / ".docfx" / "docfx.json").read_text(encoding="utf-8"))
         self.assertEqual(expected, result["projects"])
         self.assertEqual(expected, config["metadata"][0]["src"][0]["files"])
         self.assertEqual(["default", "modern"], config["build"]["template"])
@@ -113,7 +114,7 @@ class SiteTests(unittest.TestCase):
                            "</PropertyGroup></Project>\n", encoding="utf-8")
 
         # Act
-        result = site.write(self.root, "Doka.Example")
+        result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertEqual("src/Extensions/Extensions.csproj", result["projects"][1])
@@ -124,7 +125,7 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("No project under src/ packs Doka.Example.Extensions", str(raised.exception))
@@ -200,10 +201,21 @@ class SiteTests(unittest.TestCase):
             '- name: API reference\n')
 
         # Act
-        site.write(self.root, "Doka.Example")
+        site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
-        self.assertIn(expected, (self.root / "toc.yml").read_text(encoding="utf-8"))
+        self.assertIn(expected, (self.root / ".docfx" / "toc.yml").read_text(encoding="utf-8"))
+
+    def test_decision_records_sort_by_their_number(self):
+        # Arrange
+        late = record(1000)
+        self.decisions({"schema_version": 1, "decisions": [late, record(999)]})
+
+        # Act
+        items = site.decisions(self.root)
+
+        # Assert
+        self.assertEqual(["Index", "D-999 Decision 999", "D-1000 Decision 1000"], [item["name"] for item in items])
 
     def test_unknown_decision_index_schema_fails(self):
         # Arrange
@@ -211,7 +223,7 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("schema_version must be 1", str(raised.exception))
@@ -224,7 +236,7 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("decision 1 has no title", str(raised.exception))
@@ -239,7 +251,7 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("must name a Markdown file in docs/decisions", str(raised.exception))
@@ -251,7 +263,7 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("index.json is missing", str(raised.exception))
@@ -263,21 +275,61 @@ class SiteTests(unittest.TestCase):
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertIn("must link decisions/README.md exactly once, under Explanation", str(raised.exception))
 
-    def test_generated_file_in_the_repository_fails(self):
+    def test_existing_stage_in_the_repository_fails(self):
         # Arrange
-        (self.root / "docfx.json").write_text("{}", encoding="utf-8")
+        (self.root / ".docfx").mkdir()
 
         # Act
         with self.assertRaises(site.SiteError) as raised:
-            site.write(self.root, "Doka.Example")
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
-        self.assertIn("docfx.json already exists", str(raised.exception))
+        self.assertIn(".docfx already exists", str(raised.exception))
+
+    def test_stage_links_other_repository_files_to_github_and_leaves_the_checkout(self):
+        # Arrange
+        (self.root / "LICENSE").write_text("MIT\n", encoding="utf-8")
+        (self.root / "README.md").write_text("[License](LICENSE) and [limits](docs/limitations.md)\n", encoding="utf-8")
+        original = (self.root / "docs" / "limitations.md").read_text(encoding="utf-8")
+
+        # Act
+        site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
+
+        # Assert
+        self.assertEqual("[License](https://github.com/doka-labs/Doka.Example/blob/v1.2.0/LICENSE) and "
+                         "[limits](docs/limitations.md)\n",
+                         (self.root / ".docfx" / "index.md").read_text(encoding="utf-8"))
+        self.assertEqual(original, (self.root / ".docfx" / "docs" / "limitations.md").read_text(encoding="utf-8"))
+        self.assertFalse((self.root / "index.md").exists())
+        self.assertEqual("[License](LICENSE) and [limits](docs/limitations.md)\n",
+                         (self.root / "README.md").read_text(encoding="utf-8"))
+
+    def test_config_reads_the_projects_from_the_checkout(self):
+        # Arrange
+        checkout = ".."
+
+        # Act
+        site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
+
+        # Assert
+        config = json.loads((self.root / ".docfx" / "docfx.json").read_text(encoding="utf-8"))
+        self.assertEqual(checkout, config["metadata"][0]["src"][0]["src"])
+
+    def test_tag_that_is_not_a_version_fails(self):
+        # Arrange
+        tag = "main"
+
+        # Act
+        with self.assertRaises(site.SiteError) as raised:
+            site.write(self.root, "Doka.Example", REPOSITORY, tag)
+
+        # Assert
+        self.assertIn("'main' is not v<version>", str(raised.exception))
 
 
 class DeployTests(unittest.TestCase):

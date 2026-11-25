@@ -670,10 +670,22 @@ Runs after the publication and builds a DocFX 2.81.0 site from the released
 tag: the API reference of every package in `release.packages` of the release
 policy and every Markdown file under `docs/`. The project of a package is the
 project under `src/` whose `PackageId`, or else file name, is the package id.
-The tool generates `docfx.json`, `toc.yml` and `index.md` (a copy of
-`README.md`) in the checkout; a repository that has one of these files fails.
-DocFX builds with warnings as errors, so a missing XML comment or a broken
-link fails the run.
+The tool writes the site sources into `.docfx/` of the checkout: `docfx.json`,
+`toc.yml`, `README.md` as `index.md`, and a copy of `docs/`; a repository that
+has `.docfx/` fails, and nothing else of the checkout changes. DocFX builds
+with warnings as errors, so a missing XML comment or a broken link fails the
+run.
+
+Documents keep relative links to any file of the repository, which the
+checkers read. In the copy, a link to a repository file the site does not
+hold (source, tests, samples, `LICENSE`) becomes a link to that file on GitHub
+at the released tag, `blob/<tag>/<path>` or `tree/<tag>/<path>` for a
+directory, as DocFX projects link source. A link to a document or image under
+`docs/` stays relative, a link to `README.md` points to `index.md`, and a link
+to a path the repository does not have stays as written, so DocFX reports it.
+Code blocks and code spans are not changed. A link that leaves the
+repository, an image outside `docs/`, and an embedded file (`[!code...]`,
+`[!INCLUDE...]`) fail.
 
 The navigation follows `docs/README.md`. Each document kind is a section
 `## Tutorials`, `## How-to guides`, `## Reference` or `## Explanation`, in any

@@ -3,7 +3,10 @@
 The navigation follows docs/README.md: one section per document kind (Tutorials, How-to guides, Reference,
 Explanation), each a table whose first column links the document. Every Markdown file under docs/ is built, so
 links between documents resolve even when a document is not listed; only listed documents appear in the
-navigation. Nothing is written into the product checkout except the generated docfx.json, toc.yml and index.md.
+navigation.
+
+The site is built in .docfx/ of the checkout: docfx.json, toc.yml, the README as index.md, and a copy of docs/ whose
+links the site can show (see links.py). Nothing else of the checkout changes.
 
 Decision records under docs/decisions appear below the Explanation row that links decisions/README.md: first the
 index that madr-check writes, then one entry per record from its index.json.
@@ -15,6 +18,7 @@ import json
 import re
 from pathlib import Path, PurePosixPath
 
+from tools.api_reference import links
 from tools.release_lines import policy as policies
 
 KINDS = ("Tutorials", "How-to guides", "Reference", "Explanation")
@@ -22,9 +26,19 @@ HEADING = re.compile(r"^## (.+?)\s*$")
 ROW_LINK = re.compile(r"^\|\s*\[([^\]]+)\]\(([^)\s]+)\)\s*\|(.*)\|\s*$")
 TABLE_HEADER = re.compile(r"^\|\s*Document\s*\|\s*Purpose\s*\|\s*$")
 TABLE_RULE = re.compile(r"^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$")
+# WHY: The site is built from copies in one directory of its own, so the checkout keeps its relative links for
+# madr-check and as-built, and no generated file can collide with a file of the repository.
+STAGE = ".docfx"
 PACKAGE_ID = re.compile(r"<PackageId>\s*([^<\s]+)\s*</PackageId>")
+# WHY: Both values become part of every GitHub link of the site; anything but owner/name and a release tag would
+# build links to somewhere else.
+REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 DECISIONS = PurePosixPath("docs/decisions")
 DECISIONS_README = DECISIONS / "README.md"
+DECISION_NUMBER = re.compile(r"^D-([0-9]+)$")
+# WHY: madr-check keeps schema_version 1 while no field of index.json is removed or changes its meaning; a new
+# version may change the fields read here, so the site refuses it instead of building a wrong navigation.
 DECISION_INDEX_SCHEMA = 1
 # WHY: A record with one of these states is not binding or no longer recommended, so the navigation says so.
 FLAGGED_STATES = ("superseded", "rejected", "deprecated")
@@ -106,9 +120,11 @@ def decisions(root: Path) -> list[dict]:
     items = []
     for number, record in enumerate(records, start=1):
         require(isinstance(record, dict), f"{DECISIONS}/index.json: decision {number} is not an object.")
+        # WHY: Only these fields are read; madr-check may add fields to schema_version 1, and the site ignores them.
         for field in ("id", "title", "status", "path"):
             require(isinstance(record.get(field), str) and bool(record[field].strip()),
                     f"{DECISIONS}/index.json: decision {number} has no {field}.")
+        # WHY: The path becomes a link of the navigation; a record outside docs/decisions is not one of the records.
         target = DECISIONS / record["path"]
         require(target.parent == DECISIONS and target.suffix == ".md",
                 f"{DECISIONS}/index.json: '{record['path']}' must name a Markdown file in {DECISIONS}.")
@@ -120,7 +136,8 @@ def decisions(root: Path) -> list[dict]:
 
     ids = [item["id"] for item in items]
     require(len(set(ids)) == len(ids), f"{DECISIONS}/index.json lists an id twice.")
-    items.sort(key=lambda item: item["id"])
+    # WHY: Ids are D-NNN; sorting by the number keeps D-1000 after D-999, where text order would not.
+    items.sort(key=lambda item: (int(number[1]) if (number := DECISION_NUMBER.match(item["id"])) else -1, item["id"]))
     index_page = {"name": "Index", "href": (DECISIONS / "index.md").as_posix()}
     return [index_page] + [{"name": item["name"], "href": item["href"]} for item in items]
 
@@ -131,6 +148,8 @@ def attach_decisions(root: Path, sections: list[dict]) -> None:
     if not (root / DECISIONS).is_dir():
         return
 
+    # WHY: The records are explanation, and one row is the single place they hang from, as the README of this
+    # repository fixes the format of docs/README.md.
     explanation = [item for section in sections if section["name"] == "Explanation" for item in section["items"]]
     require(len(rows) == 1 and rows[0] in explanation,
             f"{DECISIONS} exists; docs/README.md must link decisions/README.md exactly once, under Explanation.")
@@ -173,38 +192,66 @@ def toc(sections: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write(root: Path, title: str) -> dict:
-    """Write docfx.json, toc.yml and index.md into the checkout and return the projects to restore."""
+def stage_documents(root: Path, stage: Path, repository: str, tag: str) -> None:
+    """Copy the README as index.md and docs/ into the stage, each document with its links as the site shows them."""
+    documents = [(root / "README.md", stage / "index.md")]
+    # WHY: Every file on disk counts, not only tracked ones: the decision index that madr-check writes before the
+    # build is not committed.
+    for path in sorted((root / "docs").rglob("*")):
+        if path.is_file() and path.suffix in links.SITE_SUFFIXES:
+            documents.append((path, stage / path.relative_to(root)))
+
+    for path, copy in documents:
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        if path.suffix != ".md":
+            copy.write_bytes(path.read_bytes())
+            continue
+
+        source = PurePosixPath(path.relative_to(root).as_posix())
+        try:
+            text = links.rewrite(path.read_text(encoding="utf-8"), source, root, repository, tag)
+        except links.LinkError as error:
+            raise SiteError(str(error)) from error
+        copy.write_text(text, encoding="utf-8")
+
+
+def write(root: Path, title: str, repository: str, tag: str) -> dict:
+    """Write the site into .docfx/ of the checkout and return the projects to restore."""
+    require(REPOSITORY.match(repository) is not None, f"'{repository}' is not owner/name.")
+    require(TAG.match(tag) is not None, f"'{tag}' is not v<version>.")
     policy = policies.load_policy(root)
     packages = list(policy["release"]["packages"])
     files = projects(root, packages)
     sections = navigation(root)
     attach_decisions(root, sections)
-    readme = root / "README.md"
-    require(readme.is_file(), "README.md is missing.")
-    for name in ("docfx.json", "toc.yml", "index.md"):
-        require(not (root / name).exists(), f"{name} already exists in the repository; the site generates it.")
+    require((root / "README.md").is_file(), "README.md is missing.")
+    stage = root / STAGE
+    require(not stage.exists(), f"{STAGE} already exists in the repository; the site generates it.")
 
+    stage_documents(root, stage, repository, tag)
+    # WHY: DocFX resolves every relative path of docfx.json from its own directory; the projects lie in the checkout
+    # one level above the stage. https://dotnet.github.io/docfx/reference/docfx-json-reference.html
     config = {
-        "metadata": [{"src": [{"src": ".", "files": files}], "dest": "api"}],
+        "metadata": [{"src": [{"src": "..", "files": files}], "dest": "api"}],
         "build": {
             "content": [{"files": ["api/**.yml", "api/index.md", "toc.yml", "index.md", "docs/**/*.md"]}],
             "resource": [{"files": ["docs/**/*.png", "docs/**/*.svg"]}],
             "output": "_site",
             # WHY: Mermaid diagrams render only in the modern template.
-            # https://dotnet.github.io/docfx/docs/markdown.html
+            # https://dotnet.github.io/docfx/docs/markdown.html#mermaid-diagrams
             "template": ["default", "modern"],
             "globalMetadata": {"_appTitle": title, "_enableSearch": True},
         },
     }
-    (root / "docfx.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    (root / "toc.yml").write_text(toc(sections), encoding="utf-8")
-    (root / "index.md").write_text(readme.read_text(encoding="utf-8"), encoding="utf-8")
+    (stage / "docfx.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    (stage / "toc.yml").write_text(toc(sections), encoding="utf-8")
     return {"projects": files, "sections": [section["name"] for section in sections]}
 
 
 def should_deploy(version: str, releases: list[dict]) -> bool:
     """Return whether this release replaces the site: stable versions always, pre-releases only before any stable."""
+    # WHY: The site shows the API that NuGet users install by default, which is the newest stable version; a
+    # pre-release shows only until a first stable version exists.
     if not policies.parse_version(version).is_prerelease:
         return True
 

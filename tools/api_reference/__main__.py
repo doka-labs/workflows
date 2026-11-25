@@ -24,16 +24,18 @@ def main(argv: list[str] | None = None) -> int:
     """Run one command and return its exit code."""
     parser = argparse.ArgumentParser(prog="python3 -m tools.api_reference")
     commands = parser.add_subparsers(dest="command", required=True)
-    generate = commands.add_parser("generate", help="Write docfx.json, toc.yml and index.md into the checkout.")
+    generate = commands.add_parser("generate", help="Write the site sources into .docfx/ of the checkout.")
     generate.add_argument("--root", type=Path, required=True)
     generate.add_argument("--title", required=True)
+    generate.add_argument("--repository", required=True, help="owner/name; links to other files go to its GitHub.")
+    generate.add_argument("--tag", required=True, help="Released tag v<version>; links to other files name it.")
     deploy = commands.add_parser("should-deploy", help="Decide whether the release replaces the published site.")
     deploy.add_argument("--repository", required=True)
     deploy.add_argument("--version", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
-            result = site.write(args.root.resolve(), args.title)
+            result = site.write(args.root.resolve(), args.title, args.repository, args.tag)
             _output("projects", " ".join(result["projects"]))
             print(f"Site for {', '.join(result['projects'])}; sections: {', '.join(result['sections'])}.")
             return 0
