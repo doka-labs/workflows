@@ -14,7 +14,10 @@ workflow and job names are the product's choice.
 A product repository keeps its own workflow files. They call the reusable
 workflows of this repository by commit SHA; each reusable workflow checks out
 `tools/` from its own commit (`job.workflow_repository` at `job.workflow_sha`)
-and runs it against the caller's checkout.
+and runs it against the caller's checkout. The publish job is the exception: the
+product repository defines it and calls the composite action
+`.github/actions/release-publish` by commit SHA, which runs `tools/` from the
+copy of this repository the runner downloads with the action.
 
 ```mermaid
 flowchart LR
@@ -44,7 +47,7 @@ flowchart LR
     pre["release-preflight.yml"]
     qual["release-qualification.yml"]
     cand["release-candidate.yml"]
-    pub["release-publish.yml"]
+    pub["actions/release-publish<br/>(composite action)"]
     api["api-reference.yml"]
     tools[("tools/ at job.workflow_sha")]
   end
@@ -278,7 +281,7 @@ flowchart TB
   cand --> tag["maintainer: pre-tag check (immutable releases<br/>enabled, draft passes the publish verification),<br/>SSH-signed annotated tag v&lt;version&gt;, push"]
   tag --> approve["environment approval"]
   sbom --> publish
-  approve --> publish["release-publish<br/>see 13"]
+  approve --> publish["publish job of the release workflow<br/>calls actions/release-publish, see 13"]
   publish --> done2(["immutable release, packages on nuget.org"])
   done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages<br/>for stable releases and before the first stable"]
 ```
@@ -333,13 +336,17 @@ flowchart TB
 
 ## 13. Publish job
 
-Every irreversible write is preceded by a full recheck. A stop anywhere is
+The publish job is defined in the product repository's release workflow and
+calls the composite action `.github/actions/release-publish`: nuget.org
+Trusted Publishing accepts only a token whose `job_workflow_ref` names the
+product repository's workflow file. Every irreversible write is preceded by a
+full recheck. A stop anywhere is
 resumed by re-running the job: what nuget.org and the draft already hold is
 observed, never replaced.
 
 ```mermaid
 flowchart TB
-  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
+  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>job token: environment and defining workflow as in the policy,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
   auth --> adm[("attest release-admission-v1")]
   adm --> pending["list packages nuget.org does not hold<br/>(other bytes there: stop)"]
   pending --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]
@@ -410,7 +417,7 @@ flowchart TB
   subgraph releases["writes or sees draft releases: contents write"]
     w1["release-preflight<br/>(only to see drafts) + attestations: read"]
     w2["release-candidate / Candidate<br/>+ id-token, attestations, actions: read"]
-    w3["release-publish<br/>+ actions: read, id-token, attestations,<br/>environment approval, secret NUGET_USER"]
+    w3["publish job of the product's release workflow<br/>calls actions/release-publish<br/>+ actions: read, id-token, attestations,<br/>environment approval, secret NUGET_USER"]
   end
   subgraph pages["deploys GitHub Pages"]
     g1["api-reference / Deploy<br/>pages: write, id-token: write,<br/>environment github-pages"]
@@ -444,7 +451,7 @@ flowchart LR
   qual -- signs --> a3[("release-qualification-v1<br/>subject: tree")]
   cand["release-candidate"] -- signs --> a4[("SLSA provenance<br/>subjects: packages, candidate.json")]
   cand -- signs --> a5[("SPDX SBOM per package<br/>subject: .nupkg")]
-  pub["release-publish"] -- signs --> a6[("release-admission-v1<br/>subject: candidate.json")]
+  pub["publish job of the product's release workflow"] -- signs --> a6[("release-admission-v1<br/>subject: candidate.json")]
   gh["GitHub"] -- "on publication" --> a7[("release attestation<br/>immutable release")]
 
   a1 -- "verified by" --> qual

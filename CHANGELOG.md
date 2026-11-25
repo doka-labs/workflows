@@ -12,6 +12,25 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+### Changed
+
+- The publication is the composite action `.github/actions/release-publish`
+  instead of the reusable workflow `release-publish.yml`, which is removed.
+  nuget.org Trusted Publishing accepts only a token whose `job_workflow_ref`
+  names the policy's workflow file in the product repository, and a job of a
+  reusable workflow from this repository names this repository there. The
+  product repository defines the `publish` job in its release workflow with
+  `environment`, permissions, concurrency and timeout, and passes the tag and
+  `nuget-user` to the action.
+- The publish job reads its own OIDC token and requires the policy's
+  repository, `release.environment` and `release.workflowPath` in its
+  `repository`, `environment` and `job_workflow_ref` claims.
+- The release admission is signed by the product repository's release
+  workflow and verified with that workflow as signer.
+- `workflow-lint.yml` audits `.github/actions` with zizmor when it exists.
+
 ## [0.3.0] - 2026-11-25
 
 ### Added

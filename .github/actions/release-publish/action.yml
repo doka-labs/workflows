@@ -1,0 +1,175 @@
+name: Release Publish
+description: >-
+  Publishes an approved candidate: rechecks the candidate assets against their attestations, current authority, the
+  publisher environment, the job's own identity and the signed tag, records the admission, pushes the packages that
+  nuget.org does not hold yet, reads them back signed with their symbols, and only then publishes the immutable
+  GitHub release. A run that stopped anywhere continues from the observed state.
+
+# WHY: nuget.org Trusted Publishing accepts a token only when its job_workflow_ref names the policy's workflow file in
+# the product repository. A job of a reusable workflow from this repository carries this repository's path there and
+# is refused, so the product repository defines the publish job in its release workflow and calls this action from
+# it. An action does not change the job's token: actions request it through the job's ACTIONS_ID_TOKEN_REQUEST_URL,
+# and NuGet/login, itself an action of another repository, publishes MySql, SafeMigrations and NestedSet that way.
+# The caller's job sets environment, permissions, concurrency and timeout, which an action cannot set; the README's
+# publish job gives each with its reason, and the tools check environment and defining workflow from the job's token.
+# https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery.Services/Authentication/Federated/GitHubTokenPolicyValidator.cs
+# https://docs.github.com/en/actions/reference/security/oidc
+#
+# WHY: Every run step names its shell: in a composite action, runs.steps[*].shell is "Required if `run` is set."
+# https://docs.github.com/en/actions/reference/workflows-and-actions/metadata-syntax#runsstepsshell
+
+inputs:
+  tag:
+    description: Release tag of the candidate, v<version>.
+    required: true
+  nuget-user:
+    description: nuget.org user name (profile name) of the Trusted Publishing policy.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # WHY: The action's directory lies in a copy of this whole repository at the called ref (actions/runner
+    # ActionManager: <actions>/<owner>/<repo>/<ref>/<path>), so the tools come from the same commit as the action.
+    # They run as a package with -E -s from that root: -I would also drop the working directory, which "python -m"
+    # otherwise puts first on sys.path. https://docs.python.org/3/using/cmdline.html
+    - name: Locate the release tools of this action
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      run: '[ -f tools/release_publication/__main__.py ] || { echo "::error::release tools not found next to the action"; exit 1; }'
+
+    # WHY: The tag comes from the caller and names the draft release, assets and paths below, so a value of another
+    # form stops here. It reaches the shell through env and not through an expression in the script, so it is never
+    # read as shell code. https://docs.github.com/en/actions/reference/security/secure-use#use-an-intermediate-environment-variable
+    - name: Check the tag form
+      shell: bash
+      env:
+        TAG: ${{ inputs.tag }}
+      run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "::error::tag must be v<version>"; exit 1; }'
+
+    # WHY: fetch-depth 0 keeps the history that proves the tagged commit belongs to the protected line.
+    - name: Check out the release source with its history
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        path: repository
+
+    # WHY: Checkout removes its credentials, and GitHub "may temporarily require authentication for some clones
+    # and fetches of public repositories over HTTPS"; NestedSet's publication failed with HTTP 403 on such a read
+    # (run 44952104737). The helper lends the job token to Git without storing it.
+    # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+    - name: Authenticate Git reads with the job token
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh auth setup-git --hostname github.com
+
+    - name: Set up the repository's .NET SDK
+      uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+      with:
+        global-json-file: repository/global.json
+
+    - name: Download the candidate from its draft release
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
+      run: python3 -E -s -m tools.release_publication download-candidate --tag "$TAG" --output "$RUNNER_TEMP/candidate"
+
+    - name: Recheck candidate, authority, environment, job identity and signed tag
+      id: authorize
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        python3 -E -s -m tools.release_publication authorize --root "$GITHUB_WORKSPACE/repository"
+        --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/admission"
+
+    - name: Attest the admission before any irreversible write
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: ${{ runner.temp }}/candidate/candidate.json
+        predicate-type: https://github.com/doka-labs/workflows/blob/main/docs/predicates/release-admission-v1.md
+        predicate-path: ${{ steps.authorize.outputs.admission }}
+
+    - name: List the packages nuget.org does not hold yet
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        python3 -E -s -m tools.release_publication pending-packages --candidate "$RUNNER_TEMP/candidate"
+        --output "$RUNNER_TEMP/pending.txt" --symbols-output "$RUNNER_TEMP/symbols.txt"
+
+    - name: Obtain a short-lived NuGet credential
+      id: login
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+      with:
+        user: ${{ inputs.nuget-user }}
+
+    # WHY: Bytes, attestations, authority, environment and tag are checked again right before the first
+    # irreversible write (MySql, SafeMigrations and NestedSet).
+    - name: Recheck before pushing to nuget.org
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: python3 -E -s -m tools.release_publication recheck --root "$GITHUB_WORKSPACE/repository" --candidate "$RUNNER_TEMP/candidate"
+
+    # WHY: --skip-duplicate keeps a package that another attempt pushed in the meantime from failing the push;
+    # its bytes were compared with the candidate in the previous step and are read back below. --no-symbols
+    # keeps the primary push from also pushing the .snupkg next to it, so every primary precedes every symbol
+    # package; the symbol packages follow for every package, because an attempt can stop between the two
+    # pushes (NestedSet and SafeMigrations push all symbol packages with --skip-duplicate on every run).
+    # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-push
+    - name: Push the pending packages, then every symbol package
+      shell: bash
+      env:
+        NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+      run: |
+        while IFS= read -r package; do
+          [ -n "$package" ] || continue
+          dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" --no-symbols --skip-duplicate --timeout 300
+        done < "$RUNNER_TEMP/pending.txt"
+        while IFS= read -r package; do
+          [ -n "$package" ] || continue
+          dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" --skip-duplicate --timeout 300
+        done < "$RUNNER_TEMP/symbols.txt"
+
+    - name: Read the packages and symbols back from nuget.org
+      id: readback
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        python3 -E -s -m tools.release_publication readback --candidate "$RUNNER_TEMP/candidate"
+        --work "$RUNNER_TEMP/readback" --root "$GITHUB_WORKSPACE/repository"
+
+    # WHY: When nuget.org has accepted the packages but not indexed them yet, the readback reports complete false and
+    # the job ends without failing; the release stays a draft, and re-running the job continues at the readback.
+    # A consumer that restores each package from nuget.org only must receive the candidate's payload before the
+    # release is published (MySql's isolated consumer).
+    - name: Restore every package from nuget.org in an isolated consumer
+      if: steps.readback.outputs.complete == 'true'
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      run: >-
+        python3 -E -s -m tools.release_publication public-consumers --root "$GITHUB_WORKSPACE/repository"
+        --candidate "$RUNNER_TEMP/candidate" --output "$RUNNER_TEMP/public-consumers"
+
+    # WHY: The same readback condition as above: the release is published only when nuget.org serves every package.
+    - name: Publish the immutable GitHub release
+      if: steps.readback.outputs.complete == 'true'
+      shell: bash
+      working-directory: ${{ github.action_path }}/../../..
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: >-
+        python3 -E -s -m tools.release_publication publish-release --root "$GITHUB_WORKSPACE/repository"
+        --candidate "$RUNNER_TEMP/candidate"

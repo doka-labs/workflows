@@ -560,9 +560,13 @@ them:
    maintainer creates and pushes the SSH-signed annotated tag `v<version>`. A
    pushed tag blocks a new candidate for its version; a broken candidate is
    deleted before tagging, not after.
-6. `release-publish.yml` in the publisher environment: after approval it
+6. The `publish` job of the repository's release workflow runs in the
+   publisher environment and calls the composite action
+   `.github/actions/release-publish` of this repository. After approval it
    rechecks the assets against their attestations, the policy on `main`, the
-   environment grants and the signed tag, and attests the admission. Before
+   environment grants, the job's own OIDC claims (the job runs in
+   `release.environment` and is defined by `release.workflowPath` of this
+   repository) and the signed tag, and attests the admission. Before
    pushing, it checks the existing Latest release and verifies the current
    draft assets. It pushes what nuget.org does not hold yet, reads every
    package back signed and every Portable PDB from the symbol server,
@@ -572,6 +576,20 @@ them:
    inventory to equal the candidate.
    If the readback is still pending after one hour, the job ends without
    failure and re-running it continues.
+
+The publish job is an action called from the product repository's own job, not
+a reusable workflow, because nuget.org Trusted Publishing compares the token's
+`job_workflow_ref` with the policy's workflow file in the product repository; a
+job of a reusable workflow from `doka-labs/workflows` names this repository
+there and is refused. An action keeps the calling job's token. The calling job
+sets `environment`, the permissions `contents: write`, `actions: read`,
+`id-token: write` and `attestations: write`, one queue per repository, and the
+timeout, as in the example below. The release admission is therefore signed by
+the product repository's release workflow. Configure the Trusted Publishing
+policy on nuget.org with the repository owner, the repository, the workflow
+file `release-candidate.yml` (the file name of `release.workflowPath`) and the
+environment `nuget`, and store the nuget.org profile name as the environment
+secret `NUGET_USER`.
 
 The job token cannot read whether immutable releases are enabled: the setting
 needs the Administration permission, which a `GITHUB_TOKEN` never has. Enforce
@@ -642,16 +660,37 @@ jobs:
   publish:
     needs: [preflight, candidate]
     if: ${{ !cancelled() && !inputs.qualification-only && (needs.candidate.result == 'success' || needs.preflight.outputs.resume == 'true') }}
+    # WHY: contents write lists the draft and publishes the release; id-token signs the admission and obtains the
+    # NuGet credential through Trusted Publishing; attestations write stores the admission. actions read is the
+    # repository permission of "GET /repos/{owner}/{repo}/environments/{environment_name}" and of its deployment
+    # branch policies, which the environment check reads.
+    # https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
+    # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
     permissions:
       contents: write
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-publish.yml@<commit-sha> # v0.1.0
-    with:
-      tag: ${{ needs.preflight.outputs.tag }}
-    secrets:
-      NUGET_USER: ${{ secrets.NUGET_USER }}
+    # WHY: The environment is release.environment of the policy and of the nuget.org policy; its reviewers approve
+    # the publication, and the action requires it in the job's environment claim.
+    environment: nuget
+    # WHY: Publications of one repository run one after another and are never cancelled midway; queue: max keeps
+    # up to 100 waiting. https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idconcurrency
+    concurrency:
+      group: ${{ github.repository }}-publication
+      cancel-in-progress: false
+      queue: max
+    # WHY: The newest generally available GitHub-hosted Ubuntu image.
+    # https://github.com/actions/runner-images/issues/14747
+    runs-on: ubuntu-26.04
+    # WHY: Successful publish jobs took up to 60.1 minutes (NestedSet) and 46.6 minutes (MySql) in 31 runs; the NuGet
+    # readback alone may wait one hour. 180 minutes is NestedSet's limit.
+    timeout-minutes: 180
+    steps:
+      - uses: doka-labs/workflows/.github/actions/release-publish@<commit-sha> # v0.4.0
+        with:
+          tag: ${{ needs.preflight.outputs.tag }}
+          nuget-user: ${{ secrets.NUGET_USER }}
 
   api-reference:
     needs: [preflight, publish]

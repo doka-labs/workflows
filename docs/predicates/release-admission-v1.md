@@ -3,9 +3,13 @@
 Predicate type:
 `https://github.com/doka-labs/workflows/blob/main/docs/predicates/release-admission-v1.md`
 
-Signed by `doka-labs/workflows/.github/workflows/release-publish.yml` after
-the environment approval and all checks of the publish job, before the first
-irreversible write (NuGet push, release publication).
+Signed by the product repository's release workflow (`release.workflowPath`
+of its release policy, for example
+`doka-labs/Doka.Tabular/.github/workflows/release-candidate.yml`), whose
+`publish` job calls the action `.github/actions/release-publish` of this
+repository, after the environment approval and all checks of the publish job,
+before the first irreversible write (NuGet push, release publication).
+Verifiers pass that workflow as `--signer-workflow`.
 
 Subject: the `candidate.json` manifest of the draft release.
 
