@@ -32,6 +32,25 @@ def _summary(text: str) -> None:
             stream.write(text + "\n")
 
 
+def _pre_tag_report(result: dict) -> str:
+    """Return the readable report of a pre-tag check: one line per check, the count, and the next step."""
+    width = max(len(item["subject"]) for item in result["checks"])
+    lines = [f"Pre-tag check for {result['tag']}", ""]
+    lines += [f"  {'OK' if item['ok'] else 'FAIL':<5} {item['subject']:<{width}}  {item['detail']}".rstrip()
+              for item in result["checks"]]
+    total = len(result["checks"])
+    lines.append("")
+    if result["failures"]:
+        lines.append(f"{result['failures']} of {total} checks failed. Fix them and run the check again; "
+                     "do not create the tag.")
+    else:
+        lines += [f"All {total} checks passed. In the product checkout, run:", "",
+                  f"  {result['command']}", f"  git push origin {result['tag']}", "",
+                  "Then approve the waiting publication in the release environment."]
+
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run one command and return its exit code."""
     parser = argparse.ArgumentParser(prog="python3 -m tools.release_publication")
@@ -71,9 +90,13 @@ def main(argv: list[str] | None = None) -> int:
     extract.add_argument("--handoff", type=Path, required=True)
     extract.add_argument("--package", required=True)
     extract.add_argument("--packages", type=Path, required=True)
-    pre_tag = commands.add_parser("pre-tag", help="Check locally that the checkout can be tagged; no writes.")
-    pre_tag.add_argument("--root", type=Path, default=Path.cwd())
-    pre_tag.add_argument("--version", required=True)
+    pre_tag = commands.add_parser(
+        "pre-tag", help="Check locally that the checkout can be tagged; no writes.",
+        description="Run every check that must pass before the signed release tag is created, from a checkout of "
+                    "doka-labs/workflows. Each check prints OK or FAIL with a remedy; nothing is written. Exit code "
+                    "0 means the printed tag command may be run, 1 means at least one check failed.")
+    pre_tag.add_argument("--root", type=Path, default=Path.cwd(), help="Checkout of the product repository.")
+    pre_tag.add_argument("--version", required=True, help="Version to tag, without the leading v.")
     stage = commands.add_parser("stage")
     stage.add_argument("--candidate", type=Path, required=True)
     recheck = commands.add_parser("recheck")
@@ -167,9 +190,8 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "pre-tag":
             result = publication.pre_tag(api, args.root.resolve(), args.version)
-            print(f"Ready to tag {result['tag']} at {result['commit']}:\n  {result['command']}\n"
-                  f"Then push the tag {result['tag']} to origin.")
-            return 0
+            print(_pre_tag_report(result))
+            return 1 if result["failures"] else 0
 
         if args.command == "stage":
             result = publication.stage(api, environment["GITHUB_REPOSITORY"], args.candidate.resolve())

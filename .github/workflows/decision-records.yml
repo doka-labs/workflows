@@ -33,12 +33,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # WHY: The digest is madr-check 0.1.0. --profile doka is fixed, so a repository cannot leave the profile by changing the keys of its records.
+      # WHY: The digest is madr-check 0.1.1. --profile doka is fixed, so a repository cannot leave the profile by changing the keys of its records.
       # The digest lives in a run block, which Dependabot does not read; a new checker version is pinned here by hand.
       - name: Hold the decision records to the Doka profile
         run: |
           set -euo pipefail
-          image='ghcr.io/kdominic89/madr-check@sha256:6cf72273d511aa00676f48741bc3436e6a00bad82bdf9d84f37b7298137ea888'
+          image='ghcr.io/kdominic89/madr-check@sha256:933d050d1e8d7fa00b5b13191a26c19bf40fcbeb0e2a0c4e7e6384548a993a6d'
           docker run --rm --network none --volume "${PWD}:/work:ro" \
             "${image}" validate --profile doka docs/decisions
           docker run --rm --network none --volume "${PWD}:/work:ro" \

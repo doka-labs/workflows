@@ -345,7 +345,7 @@ jobs:
 ### `decision-records.yml`
 
 Holds `docs/decisions` to the Doka MADR Enterprise Profile 1.0 with
-`madr-check` 0.1.0, run as the container image
+`madr-check` 0.1.1, run as the container image
 `ghcr.io/kdominic89/madr-check` pinned by digest, without network and on a
 read-only mount of the checkout: `validate --profile doka` checks every
 record, and `index check --profile doka` fails on a stale or partial generated
@@ -363,6 +363,42 @@ version of this repository.
 jobs:
   decision-records:
     uses: doka-labs/workflows/.github/workflows/decision-records.yml@<commit-sha> # v0.2.0
+```
+
+### `architecture-document.yml`
+
+Holds `docs/architecture.md` to the code with `as-built-dotnet` 0.1.0, run as
+the container image `ghcr.io/kdominic89/as-built-dotnet` pinned by digest,
+without network. The job restores `solution` on the runner (`--locked-mode`
+unless `locked-mode` is `false`), because the checker tells a call into a
+package from any other name only from the restored assets. It then mounts the
+checkout and the NuGet package folder read-only at the paths the restore
+wrote and runs `check docs/architecture.md`.
+
+The check fails when a diagram or table the document carries and the checker
+owns differs from the code, when an item `` `A` does not use `B` `` does not
+hold, on a broken link, on a diagram without `accTitle` and `accDescr`, and on
+an absolute machine path or a non-ASCII character outside diagrams and
+tables. A repository without `docs/architecture.md` fails. The checker owns a
+Mermaid block by its `accTitle` (`System context`, `Package dependencies`,
+`Areas of <project>`, `Verification`, `Reach of <Type.Member>`) and a table by
+its header (`| Area | Uses |`, `| Area | Decisions |`) under a heading that
+names a project; it adds no block and leaves every other line as it is.
+Locally, the same image with `write` instead of `check` and a writable mount
+rewrites the owned blocks.
+
+The job needs `contents: read` only. The document describes the code, so the
+caller runs the job for `docs` pull requests too and does not list it as
+skippable in `required-gate.yml`. The digest sits in a `run` block, which
+Dependabot does not read; a new checker version is pinned in this workflow by
+hand and released as a new version of this repository.
+
+```yaml
+jobs:
+  architecture-document:
+    uses: doka-labs/workflows/.github/workflows/architecture-document.yml@<commit-sha> # v0.3.0
+    with:
+      solution: Doka.Example.slnx
 ```
 
 ### Documentation-only changes
@@ -494,7 +530,7 @@ them:
 
 1. `release-preflight.yml`: the run is on the current head of a line that may
    qualify or publish the version, and `CHANGELOG.md` has a dated section for
-   it (`## [X.Y.Z] - YYYY-MM-DD` or `## X.Y.Z (YYYY-MM-DD)`). If a draft release
+   it (`## [X.Y.Z] - YYYY-MM-DD`, the only accepted form). If a draft release
    with a candidate exists for the version, the run resumes with publication
    without repeating tests, but only when the draft passes the publish job's own
    verification: every asset uploaded unchanged, the provenance and exactly the
@@ -517,9 +553,13 @@ them:
    is clean and on the current head of the protected line, the tag and
    version unused, the draft's candidate built from this commit and passing the
    publish job's verification, SSH signing configured with a key listed in
-   `.github/allowed_signers`. Then the maintainer creates and pushes the
-   SSH-signed annotated tag `v<version>`. A pushed tag blocks a new candidate
-   for its version; a broken candidate is deleted before tagging, not after.
+   `.github/allowed_signers`. Every check runs, also after a failure, and
+   prints one line `OK` or `FAIL` with a remedy; a check whose input failed
+   says what it waits for. The command writes nothing and exits with 1 when a
+   check failed; when all pass it prints the tag and push commands. Then the
+   maintainer creates and pushes the SSH-signed annotated tag `v<version>`. A
+   pushed tag blocks a new candidate for its version; a broken candidate is
+   deleted before tagging, not after.
 6. `release-publish.yml` in the publisher environment: after approval it
    rechecks the assets against their attestations, the policy on `main`, the
    environment grants and the signed tag, and attests the admission. Before
@@ -612,7 +652,70 @@ jobs:
       tag: ${{ needs.preflight.outputs.tag }}
     secrets:
       NUGET_USER: ${{ secrets.NUGET_USER }}
+
+  api-reference:
+    needs: [preflight, publish]
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: doka-labs/workflows/.github/workflows/api-reference.yml@<commit-sha> # v0.3.0
+    with:
+      tag: ${{ needs.preflight.outputs.tag }}
 ```
+
+### `api-reference.yml`
+
+Runs after the publication and builds a DocFX 2.81.0 site from the released
+tag: the API reference of every package in `release.packages` of the release
+policy and every Markdown file under `docs/`. The project of a package is the
+project under `src/` whose `PackageId`, or else file name, is the package id.
+The tool writes the site sources into `.docfx/` of the checkout: `docfx.json`,
+`toc.yml`, `README.md` as `index.md`, and a copy of `docs/`; a repository that
+has `.docfx/` fails, and nothing else of the checkout changes. DocFX builds
+with warnings as errors, so a missing XML comment or a broken link fails the
+run.
+
+Documents keep relative links to any file of the repository, which the
+checkers read. In the copy, a link to a repository file the site does not
+hold (source, tests, samples, `LICENSE`) becomes a link to that file on GitHub
+at the released tag, `blob/<tag>/<path>` or `tree/<tag>/<path>` for a
+directory, as DocFX projects link source. A link to a document or image under
+`docs/` stays relative, a link to `README.md` points to `index.md`, and a link
+to a path the repository does not have stays as written, so DocFX reports it.
+Code blocks and code spans are not changed. A link that leaves the
+repository, an image outside `docs/`, and an embedded file (`[!code...]`,
+`[!INCLUDE...]`) fail.
+
+The navigation follows `docs/README.md`. Each document kind is a section
+`## Tutorials`, `## How-to guides`, `## Reference` or `## Explanation`, in any
+subset and in this order on the site; each section is a table whose header is
+`| Document | Purpose |` and whose rows are `| [Title](path.md) | purpose |`
+with a relative link that stays under `docs/`:
+
+```markdown
+## Tutorials
+
+| Document | Purpose |
+| --- | --- |
+| [Getting started](guides/getting-started.md) | First import and export |
+```
+
+A repository with decision records in `docs/decisions` links
+`decisions/README.md` exactly once, in the Explanation table. Before the
+build, `madr-check` 0.1.1, the same image as in `decision-records.yml`, writes
+`index.md` and `index.json` into the checkout with `index write --profile
+doka`; it fails when a record does not satisfy the profile. The site lists
+below that row first the index, then each record from `index.json` as
+`<id> <title>`, sorted by id, with `(superseded)`, `(rejected)` or
+`(deprecated)` appended to a record that is not binding or no longer
+recommended. The tool reads only `schema_version`, `id`,
+`title`, `status` and `path`, and fails on a `schema_version` other than 1.
+
+A stable release always replaces the site on GitHub Pages; a pre-release
+replaces it only while the repository has no stable release, so the site shows
+the API that NuGet users get. The site is built for every release either way.
+Set the repository's Pages source to GitHub Actions before the first release.
 
 ## Community and support
 
