@@ -8,3 +8,4 @@ global using System.Reflection.PortableExecutable;
 global using System.Security.Cryptography;
 global using System.Collections.Immutable;
 global using System.Text.Json;
+global using System.Xml.Linq;
