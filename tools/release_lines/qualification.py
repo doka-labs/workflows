@@ -27,6 +27,20 @@ MAX_DOCUMENTATION_CHAIN = 50
 TRX_FAILURES = ("failed", "error", "timeout", "aborted", "passedButRunAborted", "notRunnable", "disconnected")
 TRX_FAILED_OUTCOMES = ("Failed", "Error", "Timeout", "Aborted")
 TRX_NAMESPACE = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
+# WHY: The VSTest adapter and the testing platform write a skip reason to different elements of the same TRX
+# schema, and the schema has no public specification. Measured on SDK 10.0.404 (files in tests/data):
+# xunit.runner.visualstudio 4.0.1 under VSTest ("dotnet test --logger trx") names the adapter
+# executor://xunit/VsTestRunner3/<platform>/ for xUnit v3 4.0.3 and xUnit v2 2.9.3 alike and writes
+# Output/ErrorInfo/Message; the xUnit report under the Microsoft Testing Platform ("dotnet test --report-xunit-trx")
+# names executor://<run id>/xunit.v3/<version> and writes Output/StdOut. MySql runs both, VSTest on maintenance/10.x
+# and the testing platform on main; SafeMigrations runs xUnit v2 under VSTest. A runner whose layout was not
+# measured is refused instead of read from a guessed element.
+# https://github.com/xunit/visualstudio.xunit
+# https://xunit.net/docs/getting-started/v3/microsoft-testing-platform
+TRX_SKIP_REASONS = (
+    (re.compile(r"executor://xunit/VsTestRunner3/"), ("Output", "ErrorInfo", "Message")),
+    (re.compile(r"executor://[0-9a-f-]{36}/xunit\.v3/"), ("Output", "StdOut")),
+)
 WORKFLOW_REF = re.compile(r"([^/]+/[^/]+)/(\.github/workflows/[^@]+)@(.+)\Z")
 
 
@@ -213,14 +227,22 @@ def read_trx(path: Path) -> list[dict]:
     except (ElementTree.ParseError, OSError) as error:
         raise QualificationError(f"{path.name} is not a readable TRX file.") from error
 
-    assemblies = {}
+    assemblies, layouts = {}, {}
     for test in root.iter(f"{TRX_NAMESPACE}UnitTest"):
         method = test.find(f"{TRX_NAMESPACE}TestMethod")
         code_base = method.get("codeBase") if method is not None else None
         if not test.get("id") or not code_base:
             raise QualificationError(f"{path.name} has a test definition without its assembly.")
 
+        adapter = method.get("adapterTypeName", "")
+        layout = next((path for pattern, path in TRX_SKIP_REASONS if pattern.match(adapter)), None)
+        if layout is None:
+            raise QualificationError(f"{path.name} comes from the test adapter {adapter or '(none)'}, whose TRX "
+                                     "layout is not known; only the xUnit v3 VSTest adapter and the xUnit report "
+                                     "of the Microsoft Testing Platform are read.")
+
         assemblies[test.get("id")] = Path(code_base.replace("\\", "/")).stem
+        layouts[test.get("id")] = layout
 
     # WHY: The summary must agree with the results: NestedSet requires Counters with total equal to the number of
     # results and failed 0, MySql failed 0. A run that errored, timed out or was aborted can still contain only
@@ -239,9 +261,7 @@ def read_trx(path: Path) -> list[dict]:
         if identity not in assemblies:
             raise QualificationError(f"{path.name} has a result without a test definition.")
 
-        # WHY: xUnit writes the skip reason of a NotExecuted result to Output/ErrorInfo/Message, as in MySql's TRX of
-        # run 44491092524 (327 skipped tests, all with a reason there); the TRX format has no public specification.
-        message = result.find(f"{TRX_NAMESPACE}Output/{TRX_NAMESPACE}ErrorInfo/{TRX_NAMESPACE}Message")
+        message = result.find("/".join(f"{TRX_NAMESPACE}{name}" for name in layouts[identity]))
         results.append({"testId": identity, "outcome": result.get("outcome"), "assembly": assemblies[identity],
                         "reason": (message.text or "").strip() if message is not None else ""})
 
@@ -350,23 +370,9 @@ def verify_pr_qualification(subject: Path, repository: str, tree: str, source_re
     return attestation.latest(matching)
 
 
-def qualify(api, environment: dict, root: Path, *, version: str, qualification_only: bool, trx_dir: Path,
-            output: Path, verify=attestation.verify) -> dict:
-    """Qualify the checked-out candidate and write the subject and both predicates; return a summary."""
-    repository = environment.get("GITHUB_REPOSITORY", "")
-    source_ref = environment.get("GITHUB_REF", "")
-    commit = environment.get("GITHUB_SHA", "")
-    if git_tree(root, "HEAD") != git_tree(root, commit):
-        raise QualificationError("The checkout is not the commit of this run.")
-
-    from tools.release_lines.coordinator import observe_authority
-
-    authority = observe_authority(api, repository)
-    policy = authority["policy"]
-    snapshot = policies.freeze_line(policy, source_ref, version, policy_commit=authority["commit"],
-                                    qualification_only=qualification_only)
-    tree = git_tree(root, commit)
-    subject = attestation.tree_subject(output, tree)
+def protected_gates(root: Path, repository: str, tree: str, source_ref: str, policy: dict, *,
+                    verify=attestation.verify) -> list[dict]:
+    """Return every protected-check gate of the policy with the pull request qualification that attested it."""
     gates = []
     protected = {}
     for gate in policy["qualification"]["gates"]:
@@ -384,6 +390,27 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
                       "attempt": pr["attempt"], "pullRequest": pr["predicate"].get("pullRequest"),
                       "tree": pr["predicate"].get("tree"), "documentationTrees": chain} for name in names)
 
+    return gates
+
+
+def qualify(api, environment: dict, root: Path, *, version: str, qualification_only: bool, trx_dir: Path,
+            output: Path, verify=attestation.verify) -> dict:
+    """Qualify the checked-out candidate and write the subject and both predicates; return a summary."""
+    repository = environment.get("GITHUB_REPOSITORY", "")
+    source_ref = environment.get("GITHUB_REF", "")
+    commit = environment.get("GITHUB_SHA", "")
+    if git_tree(root, "HEAD") != git_tree(root, commit):
+        raise QualificationError("The checkout is not the commit of this run.")
+
+    from tools.release_lines.coordinator import observe_authority
+
+    authority = observe_authority(api, repository)
+    policy = authority["policy"]
+    snapshot = policies.freeze_line(policy, source_ref, version, policy_commit=authority["commit"],
+                                    qualification_only=qualification_only)
+    tree = git_tree(root, commit)
+    subject = attestation.tree_subject(output, tree)
+    gates = protected_gates(root, repository, tree, source_ref, policy, verify=verify)
     produced = [gate["name"] for gate in policy["qualification"]["gates"] if gate["kind"] == "candidate-produced"]
     foreign = sorted(gate["name"] for gate in policy["qualification"]["gates"]
                      if gate["kind"] == "candidate-produced" and gate["workflow"] != workflow_path(environment))

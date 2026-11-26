@@ -20,7 +20,7 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import quote
 
-from tools.release_lines import attestation
+from tools.release_lines import attestation, qualification
 from tools.release_lines import policy as policies
 from tools.release_lines.coordinator import observe_authority, protected_head
 from tools.release_lines.github import GitHubError
@@ -774,6 +774,100 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
     return release
 
 
+TAG_READINESS_CHECKS = (
+    "Changelog section", "Tag unused", "No other tag on the commit", "Version unused on nuget.org",
+    "Draft holds this run's candidate", "Draft passes publish verification", "Allowed signers listed",
+)
+
+
+def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=nuget.fetch,
+                  verify=attestation.verify) -> dict:
+    """Check, in the line's own release run, everything the signed tag needs before it may be created."""
+    # WHY: The draft exists only in the run that built it, so its checks run there, with the workflows version the
+    # line pins; pre_tag ran the other checks on the maintainer's machine before the run, and they are repeated
+    # because the line or nuget.org can have changed since. Every check runs and reports OK or FAIL, also after a
+    # failure (MySql eng/release/pre-tag-check.sh).
+    repository, commit, tag = environment["GITHUB_REPOSITORY"], environment["GITHUB_SHA"], f"v{version}"
+    checks: list[dict] = []
+    state: dict = {}
+
+    def check(subject: str, action, remedy: str, *needs: str) -> None:
+        missing = [need for need in needs if need not in state]
+        if missing:
+            checks.append({"subject": subject, "ok": False, "detail": f"Not checked: needs {', '.join(missing)}."})
+            return
+
+        try:
+            detail = action()
+        except (PublicationError, GitHubError, policies.PolicyError, nuget.NuGetError, OSError, ValueError,
+                KeyError) as error:
+            checks.append({"subject": subject, "ok": False, "detail": f"{error} {remedy}".strip()})
+            return
+
+        checks.append({"subject": subject, "ok": True, "detail": detail or ""})
+
+    def changelog() -> str:
+        release_notes(root, version)
+        return f"## [{version}]"
+
+    def tag_unused() -> str:
+        require(not tag_exists(api, repository, tag), f"{tag} already exists.")
+        return tag
+
+    def no_other_tag() -> str:
+        others = tags_on_commit(root, commit)
+        require(not others, f"{commit} already carries the tags {', '.join(others)}.")
+        return ""
+
+    def version_unused() -> str:
+        names = observe_authority(api, repository)["policy"]["release"]["packages"]
+        taken = sorted(name for name, found in nuget.unused(names, version, fetcher=fetcher).items()
+                       if found != "absent")
+        require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
+        return ", ".join(names)
+
+    def draft_candidate() -> str:
+        release = release_for(api, repository, tag)
+        require(release is not None and release.get("draft") is True, f"No draft release holds a candidate for {tag}.")
+        # WHY: The tag must point at the commit the draft's candidate was built from (NestedSet).
+        asset = release_assets(api, repository, release).get(CANDIDATE)
+        require(asset is not None, f"The draft of {tag} has no {CANDIDATE}.")
+        manifest = json.loads(asset_bytes(repository, asset))
+        require(manifest.get("commit") == commit and manifest.get("version") == version,
+                f"The draft's candidate was built from {manifest.get('commit')}, not from {commit}.")
+        state["release"] = release
+        return f"draft {release.get('id')}"
+
+    def draft_verified() -> str:
+        # WHY: Once pushed, a tag blocks a new candidate for its version (preflight refuses a tag without a release),
+        # so the draft must already pass the verification the publish job runs: every asset, the provenance and
+        # exactly the SBOMs attested.
+        require_complete_draft(api, repository, state["release"], verify=verify)
+        return ""
+
+    def signers() -> str:
+        # WHY: git verify-tag reads gpg.ssh.allowedSignersFile; a commit without a key there cannot get a tag that
+        # the publish job accepts.
+        # https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile
+        lines = run(["git", "-C", str(root), "show", f"{commit}:{ALLOWED_SIGNERS}"]).splitlines()
+        keys = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+        require(bool(keys), f"{ALLOWED_SIGNERS} of {commit} lists no key.")
+        return f"{len(keys)} keys"
+
+    check("Changelog section", changelog, f"Add the section ## [{version}] - YYYY-MM-DD to CHANGELOG.md and merge it.")
+    check("Tag unused", tag_unused, "Choose the next version.")
+    check("No other tag on the commit", no_other_tag, "Release from a commit that carries no version tag.")
+    check("Version unused on nuget.org", version_unused, "Choose the next version.")
+    check("Draft holds this run's candidate", draft_candidate, "Re-run the failed candidate jobs of this run.")
+    check("Draft passes publish verification", draft_verified, "Delete the draft and start the candidate again.",
+          "release")
+    check("Allowed signers listed", signers, f"Add the maintainer's public key to {ALLOWED_SIGNERS} on the line.")
+    # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
+    require([item["subject"] for item in checks] == list(TAG_READINESS_CHECKS), "The tag check did not complete.")
+    return {"repository": repository, "tag": tag, "commit": commit, "checks": checks,
+            "failures": sum(not item["ok"] for item in checks)}
+
+
 def repository_of(root: Path) -> str:
     """Return owner/name of the checkout's origin on GitHub."""
     url = run(["git", "-C", str(root), "remote", "get-url", "origin"]).strip()
@@ -782,30 +876,12 @@ def repository_of(root: Path) -> str:
     return match[1]
 
 
-def signing_key_registered(root: Path, signing_key: str) -> bool:
-    """Return whether the configured SSH signing key's public key is listed in .github/allowed_signers."""
-    if signing_key.startswith("key::"):
-        public = signing_key.removeprefix("key::")
-    elif signing_key.startswith("ssh-"):
-        public = signing_key
-    else:
-        path = Path(signing_key).expanduser()
-        public_path = path if path.suffix == ".pub" else path.with_name(path.name + ".pub")
-        require(public_path.is_file(), f"The public key of the signing key ({public_path}) does not exist.")
-        public = public_path.read_text(encoding="utf-8")
-
-    key_type, _, key_data = public.strip().partition(" ")
-    key = f"{key_type} {key_data.split()[0]}" if key_data else ""
-    signers = (root / ALLOWED_SIGNERS).read_text(encoding="utf-8").splitlines()
-    return bool(key) and any(key in line for line in signers if line.strip() and not line.lstrip().startswith("#"))
-
-
 def require_immutable_releases(api, repository: str) -> None:
-    """Check the repository setting before any publication write."""
+    """Require the repository setting that locks a published release."""
     # WHY: Publishing locks the release only when immutable releases are enabled; the job token cannot check it,
     # because "GET /repos/{owner}/{repo}/immutable-releases" needs the Administration permission, which a
-    # GITHUB_TOKEN never has. The documentation names 404 for a disabled setting, but
-    # GitHub also answers 200 with "enabled": false (doka-labs/workflows; NestedSet answers "enabled": true).
+    # GITHUB_TOKEN never has. The documentation names 404 for a disabled setting, but GitHub also answers 200 with
+    # "enabled": false (doka-labs/workflows; NestedSet answers "enabled": true).
     # https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository
     # https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
     try:
@@ -820,24 +896,50 @@ def require_immutable_releases(api, repository: str) -> None:
             f"Immutable releases are not enabled for {repository}, or the token cannot read the setting.")
 
 
-PRE_TAG_CHECKS = (
-    "Changelog section", "Origin repository", "Immutable releases", "Clean checkout", "Protected line head",
-    "Tag unused", "No other tag on the commit", "Version unused on nuget.org", "Draft holds this commit's candidate",
-    "Draft passes publish verification", "SSH signing format", "Signing key configured", "Signing key allowed",
-)
-
-
 def git_config(root: Path, key: str) -> str:
     """Return a Git configuration value of the checkout, or an empty string when it is not set."""
     return subprocess.run(["git", "-C", str(root), "config", "--get", key], capture_output=True, text=True,
                           timeout=30, check=False).stdout.strip()
 
 
+def public_key(signing_key: str) -> str:
+    """Return "<type> <base64>" of the SSH key that user.signingkey names."""
+    # WHY: user.signingkey holds a key file, "key::" with a literal key, or a literal key starting with "ssh-".
+    # https://git-scm.com/docs/git-config#Documentation/git-config.txt-usersigningKey
+    if signing_key.startswith("key::"):
+        text = signing_key.removeprefix("key::")
+    elif signing_key.startswith("ssh-"):
+        text = signing_key
+    else:
+        path = Path(signing_key).expanduser()
+        public = path if path.suffix == ".pub" else path.with_name(path.name + ".pub")
+        require(public.is_file(), f"The public key of the signing key ({public}) does not exist.")
+        text = public.read_text(encoding="utf-8")
+
+    key_type, _, key_data = text.strip().partition(" ")
+    require(bool(key_data.split()), "user.signingkey names no SSH public key.")
+    return f"{key_type} {key_data.split()[0]}"
+
+
+def listed(key: str, signers: str) -> bool:
+    """Return whether an allowed-signers text lists the key."""
+    return any(key in line for line in signers.splitlines() if line.strip() and not line.lstrip().startswith("#"))
+
+
+PRE_TAG_CHECKS = (
+    "Changelog section", "Origin repository", "Immutable releases", "Clean checkout", "Protected line head",
+    "Tag unused", "No other tag on the commit", "Version unused on nuget.org", "Pull request qualification",
+    "SSH signing format", "Signing key configured", "Signing key allowed", "Signer file for git tag -v",
+)
+
+
 def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attestation.verify) -> dict:
-    """Check locally, without any write, that the checkout can be tagged; every check runs and reports a line."""
-    # WHY: The maintainer runs this before the irreversible tag. Stopping at the first failure hid the others and
-    # cost one run per problem; every check reports OK or FAIL with a remedy, and a check whose input failed reports
-    # what it waits for instead of being skipped silently (MySql eng/release/pre-tag-check.sh).
+    """Check on the maintainer's machine, before the candidate starts and without any write, that it can succeed."""
+    # WHY: A missing changelog section or a used version would otherwise only show as a failed release run. The
+    # product repository's eng/pre-tag-check.sh fetches this code at the commit its release workflow pins, so every
+    # line checks with its own version. Every check runs and reports OK or FAIL with a remedy, and a check whose
+    # input failed reports what it waits for (MySql eng/release/pre-tag-check.sh). The draft checks run in the
+    # release run's Tag check, because the draft exists only there.
     checks: list[dict] = []
     state: dict = {"tag": f"v{version}"}
 
@@ -849,7 +951,8 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
 
         try:
             detail = action()
-        except (PublicationError, GitHubError, policies.PolicyError, OSError, ValueError, KeyError) as error:
+        except (PublicationError, GitHubError, policies.PolicyError, qualification.QualificationError,
+                nuget.NuGetError, OSError, ValueError, KeyError) as error:
             checks.append({"subject": subject, "ok": False, "detail": f"{error} {remedy}".strip()})
             return
 
@@ -881,7 +984,7 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
         commit = run(["git", "-C", str(root), "rev-parse", "HEAD"]).strip()
         require(protected_head(api, state["repository"], source_ref) == commit,
                 f"The checkout is not the current head of the protected {branch}.")
-        state["policy"], state["commit"] = policy, commit
+        state["policy"], state["commit"], state["source_ref"] = policy, commit, source_ref
         return f"{branch} at {commit}"
 
     def tag_unused() -> str:
@@ -900,64 +1003,59 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
         require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
         return ", ".join(names)
 
-    def draft_candidate() -> str:
-        release = release_for(api, state["repository"], state["tag"])
-        require(release is not None and release.get("draft") is True,
-                f"No draft release holds a candidate for {state['tag']}.")
-        # WHY: The tag must point at the commit the draft's candidate was built from (NestedSet).
-        asset = release_assets(api, state["repository"], release).get(CANDIDATE)
-        require(asset is not None, f"The draft of {state['tag']} has no {CANDIDATE}.")
-        manifest = json.loads(asset_bytes(state["repository"], asset))
-        require(manifest.get("commit") == state["commit"] and manifest.get("version") == version,
-                f"The draft's candidate was built from {manifest.get('commit')}, not from {state['commit']}.")
-        state["release"] = release
-        return f"draft {release.get('id')}"
-
-    def draft_verified() -> str:
-        # WHY: Once pushed, a tag blocks a new candidate for its version (preflight refuses a tag without a release),
-        # so the draft must already pass the verification the publish job runs: every asset, the provenance and
-        # exactly the SBOMs attested. A draft that fails here is deleted and rebuilt before anything is tagged.
-        require_complete_draft(api, state["repository"], state["release"], verify=verify)
-        return ""
+    def pr_qualification() -> str:
+        # WHY: The release qualification accepts the commit only with the pull request qualification of its tree
+        # (MySql's pre-tag check reads the same evidence); the same function decides here.
+        tree = qualification.git_tree(root, state["commit"])
+        gates = qualification.protected_gates(root, state["repository"], tree, state["source_ref"], state["policy"],
+                                              verify=verify)
+        return ", ".join(sorted({gate["name"] for gate in gates}))
 
     def signing_format() -> str:
-        # WHY: Tags are SSH-signed; git verify-tag later checks them against .github/allowed_signers.
+        # WHY: Tags are SSH-signed; the publish job checks them against .github/allowed_signers.
         require(git_config(root, "gpg.format") == "ssh", "gpg.format is not ssh.")
         return "ssh"
 
     def signing_key() -> str:
         key = git_config(root, "user.signingkey")
         require(bool(key), "user.signingkey is not set.")
-        state["signing_key"] = key
-        return ""
+        state["key"] = public_key(key)
+        return state["key"].split()[0]
 
     def signing_allowed() -> str:
-        require(signing_key_registered(root, state["signing_key"]), f"The key is not listed in {ALLOWED_SIGNERS}.")
+        signers = run(["git", "-C", str(root), "show", f"{state['commit']}:{ALLOWED_SIGNERS}"])
+        require(listed(state["key"], signers), f"The key is not listed in {ALLOWED_SIGNERS} of the line.")
         return ALLOWED_SIGNERS
+
+    def signer_file() -> str:
+        # WHY: git tag -v verifies an SSH signature against gpg.ssh.allowedSignersFile; without the key there it
+        # fails although the tag is valid for the publish job.
+        # https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile
+        configured = git_config(root, "gpg.ssh.allowedSignersFile")
+        require(bool(configured), "gpg.ssh.allowedSignersFile is not set.")
+        path = Path(configured).expanduser()
+        require(path.is_file(), f"{path} does not exist.")
+        require(listed(state["key"], path.read_text(encoding="utf-8")), f"The key is not listed in {path}.")
+        return str(path)
 
     check("Changelog section", changelog, f"Add the section ## [{version}] - YYYY-MM-DD to CHANGELOG.md and merge it.")
     check("Origin repository", origin, "Run the command in a checkout whose origin is the GitHub repository.")
-    check("Immutable releases", immutable, "Enable immutable releases in the organization settings.",
+    check("Immutable releases", immutable, "Enable immutable releases in the repository or organization settings.",
           "repository")
     check("Clean checkout", clean, "Commit, stash, or remove the changes.")
     check("Protected line head", line_head, "Check out the release line and pull its current head.", "repository")
     check("Tag unused", tag_unused, "Choose the next version.", "repository")
     check("No other tag on the commit", no_other_tag, "Release from a commit that carries no version tag.", "commit")
     check("Version unused on nuget.org", version_unused, "Choose the next version.", "policy")
-    check("Draft holds this commit's candidate", draft_candidate,
-          "Start the release candidate for this commit and wait for it.", "repository", "commit")
-    check("Draft passes publish verification", draft_verified, "Delete the draft and start the candidate again.",
-          "release")
-    check("SSH signing format", signing_format, "Run: git config gpg.format ssh")
-    check("Signing key configured", signing_key, "Run: git config user.signingkey <path to the public key>")
+    check("Pull request qualification", pr_qualification,
+          "Merge the change through a pull request whose required checks passed.", "commit")
+    check("SSH signing format", signing_format, "Set gpg.format to ssh in the Git configuration.")
+    check("Signing key configured", signing_key, "Set user.signingkey to the SSH public key in the Git configuration.")
     check("Signing key allowed", signing_allowed, f"Add the public key to {ALLOWED_SIGNERS} on the release line.",
-          "signing_key")
+          "key", "commit")
+    check("Signer file for git tag -v", signer_file,
+          "Set gpg.ssh.allowedSignersFile to a file that lists the public key.", "key")
     # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
     require([item["subject"] for item in checks] == list(PRE_TAG_CHECKS), "The pre-tag check did not complete.")
-
-    failures = sum(not item["ok"] for item in checks)
-    result = {"tag": state["tag"], "commit": state.get("commit"), "checks": checks, "failures": failures}
-    if not failures:
-        result["command"] = f'git tag -s {state["tag"]} {state["commit"]} -m "{state["tag"]}"'
-
-    return result
+    return {"tag": state["tag"], "commit": state.get("commit"), "checks": checks,
+            "failures": sum(not item["ok"] for item in checks)}

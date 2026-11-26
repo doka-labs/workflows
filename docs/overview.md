@@ -92,7 +92,7 @@ flowchart LR
   cp --> cov2["coverage-gate"]
   cs --> sc2["change-scope, release-pr-attestation,<br/>release-qualification"]
   dt & dy --> check2
-  as --> pub2["publish, pre-tag"]
+  as --> pub2["publish, Tag check"]
   cl --> pre2["preflight, candidate"]
   gj --> check2
   pa --> cand2["release-candidate"]
@@ -269,6 +269,7 @@ later run of the same version finds the draft and continues at publication.
 
 ```mermaid
 flowchart TB
+  local(["maintainer: eng/pre-tag-check.sh VERSION<br/>workflows at the line's pin, no writes"]) --> start
   start(["workflow_dispatch<br/>version, qualification-only"]) --> pre["release-preflight<br/>see 10"]
   pre --> resume{"release with candidate.json<br/>for this version, a draft complete?"}
   resume -- "yes: resume" --> publish
@@ -278,9 +279,10 @@ flowchart TB
   only -- yes --> done1(["end: qualified, never published"])
   only -- no --> cand["release-candidate / Candidate<br/>see 12"]
   cand --> sbom["release-candidate / SBOM<br/>one SBOM attestation per package"]
-  cand --> tag["maintainer: pre-tag check (immutable releases<br/>enabled, draft passes the publish verification),<br/>SSH-signed annotated tag v&lt;version&gt;, push"]
+  sbom --> check["release-candidate / Tag check<br/>tag and version unused, draft passes<br/>the publish verification"]
+  check --> tag["maintainer: SSH-signed annotated tag v&lt;version&gt;<br/>on the candidate commit, git tag -v, push the tag"]
   tag --> approve["environment approval"]
-  sbom --> publish
+  check --> publish
   approve --> publish["publish job of the release workflow<br/>calls actions/release-publish, see 13"]
   publish --> done2(["immutable release, packages on nuget.org"])
   done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages<br/>for stable releases and before the first stable"]
@@ -314,7 +316,7 @@ flowchart TB
   q4 --> q5{"candidate-produced gates?"}
   q5 -- yes --> q6["those jobs of this run succeeded"]
   q5 -- no --> q7
-  q6 --> q7["TRX of every test project: no failure,<br/>no duplicate, skips only where the policy<br/>accepts them and with a reason"]
+  q6 --> q7["TRX of every test project, VSTest or<br/>Microsoft Testing Platform: no failure,<br/>no duplicate, skips only where the policy<br/>accepts them and with a reason"]
   q7 --> q8["every release package has one packable project<br/>with EnablePackageValidation=true"]
   q8 --> q9[("attest release-line-snapshot-v1<br/>and release-qualification-v1, subject: tree")]
 ```
@@ -326,7 +328,7 @@ flowchart TB
   c1["download the packages artifact"] --> c2["install sbom-tool 4.1.5, checksum-verified"]
   c2 --> c3["per package: isolated consumer restores it from<br/>a feed of the candidate packages only,<br/>restored archives byte-identical to the candidate,<br/>no test or build tooling in the graph"]
   c3 --> c4["per package: SPDX 2.2 SBOM from that consumer,<br/>validated by sbom-tool, exact dependency closure,<br/>describes exactly the candidate archive"]
-  c4 --> c5["Portable PDBs match their assemblies,<br/>symbol probes derived (tools/NuGetSymbols)"]
+  c4 --> c5["exact pin where a package grants internals,<br/>Portable PDBs match their assemblies,<br/>symbol probes derived (tools/NuGetSymbols)"]
   c5 --> c6["packages bound to repository and commit,<br/>exactly release.packages, versions unused,<br/>write candidate.json"]
   c6 --> c7[("attest SLSA provenance<br/>packages and candidate.json")]
   c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>sboms.json: every SBOM with its digest<br/>and its package's digest")]
@@ -372,7 +374,7 @@ flowchart LR
   pa --> sbom
   cand --> draft[("draft release<br/>candidate.json, .nupkg, .snupkg, .spdx.json,<br/>release-notes.md, symbol-probes.json")]
   draft --> pub["Publish"]
-  draft --> pretag["pre-tag (local)"]
+  draft --> pretag["Tag check"]
   prat["PR attestation"] --> store[("GitHub attestations")]
   qual --> store
   cand --> store

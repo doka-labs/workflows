@@ -129,5 +129,117 @@ class NuGetSymbolsTests(unittest.TestCase):
         self.assertIn("has no matching .snupkg", result.stderr)
 
 
+class InternalsPinTests(unittest.TestCase):
+    """Packs a library that grants its internals to a second packed library, as Tabular's core and EF packages."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory()
+        # WHY: On macOS the temporary directory lies under the /var symlink; packed from there, NuGet left the
+        # project reference out of the nuspec, so the work directory is used by its resolved path.
+        cls.work = Path(cls.directory.name).resolve()
+        cls.packages = {grant: cls.pack(grant) for grant in (True, False)}
+        built = run(["dotnet", "build", str(TOOL), "-c", "Release", "-nologo"], ROOT)
+        if built.returncode:
+            raise AssertionError(built.stdout + built.stderr)
+
+    @classmethod
+    def pack(cls, grant):
+        root = cls.work / ("granted" if grant else "public")
+        friend = '<ItemGroup><InternalsVisibleTo Include="Probe.Extension" /></ItemGroup>' if grant else ""
+        properties = ("<PropertyGroup><TargetFramework>net10.0</TargetFramework><IncludeSymbols>true</IncludeSymbols>"
+                      "<SymbolPackageFormat>snupkg</SymbolPackageFormat><Version>1.0.0</Version></PropertyGroup>")
+        for name, body, extra in (
+                ("Probe.Core", "namespace Probe; public static class Core { internal static int One => 1; }", friend),
+                ("Probe.Extension", "namespace Probe; public static class Extension { public static int Two => 2; }",
+                 '<ItemGroup><ProjectReference Include="../Probe.Core/Probe.Core.csproj" /></ItemGroup>')):
+            project = root / name
+            project.mkdir(parents=True)
+            (project / f"{name}.csproj").write_text(f'<Project Sdk="Microsoft.NET.Sdk">{properties}{extra}</Project>',
+                                                    encoding="ascii")
+            (project / f"{name}.cs").write_text(body, encoding="ascii")
+
+        for name in ("Probe.Core", "Probe.Extension"):
+            packed = run(["dotnet", "pack", str(root / name), "-c", "Release", "-o", str(root / "packages"), "-nologo"],
+                         ROOT)
+            if packed.returncode:
+                raise AssertionError(packed.stdout + packed.stderr)
+
+        return root / "packages"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def check(self, packages):
+        return run(["dotnet", "run", "--no-build", "--project", str(TOOL), "-c", "Release", "--",
+                    "--packages", str(packages), "--output", str(self.work / "probes.json")], ROOT)
+
+    def with_range(self, name, packages, version_range):
+        target = self.work / name
+        target.mkdir()
+        for source in packages.iterdir():
+            if source.name != "Probe.Extension.1.0.0.nupkg":
+                (target / source.name).write_bytes(source.read_bytes())
+                continue
+
+            with zipfile.ZipFile(source) as original, zipfile.ZipFile(target / source.name, "w") as copy:
+                for entry in original.infolist():
+                    data = original.read(entry)
+                    if entry.filename.endswith(".nuspec"):
+                        self.assertEqual(1, data.count(b'id="Probe.Core" version="1.0.0"'))
+                        data = data.replace(b'id="Probe.Core" version="1.0.0"',
+                                            f'id="Probe.Core" version="{version_range}"'.encode("ascii"))
+
+                    copy.writestr(entry, data)
+
+        return target
+
+    def test_granted_internals_with_a_minimum_version_fail(self):
+        # Arrange
+        packages = self.packages[True]
+
+        # Act
+        result = self.check(packages)
+
+        # Assert
+        self.assertEqual(1, result.returncode)
+        self.assertIn("Probe.Extension depends on Probe.Core with the range 1.0.0, but Probe.Core grants it its "
+                      "internals; the dependency needs the exact pin [1.0.0].", result.stderr)
+
+    def test_granted_internals_with_an_open_range_fail(self):
+        # Arrange
+        packages = self.with_range("open", self.packages[True], "[1.0.0, 2.0.0)")
+
+        # Act
+        result = self.check(packages)
+
+        # Assert
+        self.assertEqual(1, result.returncode)
+        self.assertIn("needs the exact pin [1.0.0]", result.stderr)
+
+    def test_granted_internals_with_the_exact_pin_pass(self):
+        # Arrange
+        packages = self.with_range("exact", self.packages[True], "[1.0.0]")
+
+        # Act
+        result = self.check(packages)
+
+        # Assert
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Verified 1 exact pins", result.stdout)
+
+    def test_dependency_without_granted_internals_keeps_its_range(self):
+        # Arrange
+        packages = self.packages[False]
+
+        # Act
+        result = self.check(packages)
+
+        # Assert
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("Verified 0 exact pins", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

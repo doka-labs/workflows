@@ -1,8 +1,8 @@
 namespace NuGetSymbols;
 
 /// <summary>
-/// Writes the symbol-server probes of a package directory as JSON:
-/// <c>NuGetSymbols --packages &lt;directory&gt; --output &lt;file&gt;</c>.
+/// Checks the exact pins of packages that share internals and writes the symbol-server probes of a package
+/// directory as JSON: <c>NuGetSymbols --packages &lt;directory&gt; --output &lt;file&gt;</c>.
 /// </summary>
 internal static class Program
 {
@@ -24,6 +24,8 @@ internal static class Program
 
         try
         {
+            var pinned = InternalsPinCheck.Verify(packages);
+            Console.WriteLine($"Verified {pinned} exact pins of packages that share internals.");
             var probes = SymbolProbeBuilder.Build(packages);
             var document = new { schemaVersion = 1, probes };
             File.WriteAllText(output, JsonSerializer.Serialize(document, s_jsonOptions) + Environment.NewLine);

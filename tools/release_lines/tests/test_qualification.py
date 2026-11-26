@@ -15,14 +15,24 @@ PROJECTS = {"Doka.Example.Tests": "tests/Doka.Example.Tests/Doka.Example.Tests.c
             "Doka.Example.FunctionalTests": "tests/Doka.Example.FunctionalTests/Doka.Example.FunctionalTests.csproj"}
 
 
-def trx(results, outcome=None, counters=None):
+DATA = Path(__file__).parent / "data"
+# The adapter and the skip reason element each runner writes, as in the measured files under data/.
+RUNNERS = {
+    "vstest": ("executor://xunit/VsTestRunner3/netcore/",
+               "<Output><ErrorInfo><Message>{}</Message></ErrorInfo></Output>"),
+    "mtp": ("executor://42966c0f-b13d-4371-92ed-76191e4e732e/xunit.v3/4.0.3", "<Output><StdOut>{}</StdOut></Output>"),
+}
+
+
+def trx(results, outcome=None, counters=None, runner="vstest", adapter=None, reason_layout=None):
     definitions, entries = [], []
+    runner_adapter, runner_layout = RUNNERS[runner]
     for index, (assembly, outcome, reason) in enumerate(results):
         test_id = f"00000000-0000-0000-0000-{index:012d}"
         definitions.append(f'<UnitTest name="T{index}" id="{test_id}"><TestMethod '
                            f'codeBase="/w/artifacts/bin/{assembly}/release/{assembly}.dll" className="C" '
-                           f'name="T{index}" /></UnitTest>')
-        output = (f"<Output><ErrorInfo><Message>{reason}</Message></ErrorInfo></Output>" if reason is not None else "")
+                           f'name="T{index}" adapterTypeName="{adapter or runner_adapter}" /></UnitTest>')
+        output = (reason_layout or runner_layout).format(reason) if reason is not None else ""
         entries.append(f'<UnitTestResult testId="{test_id}" testName="T{index}" outcome="{outcome}">{output}'
                        "</UnitTestResult>")
 
@@ -35,6 +45,7 @@ def trx(results, outcome=None, counters=None):
 
 
 class TestResultTests(unittest.TestCase):
+    runner = "vstest"
     summary = {}
 
     def check(self, files, skips=frozenset()):
@@ -42,7 +53,7 @@ class TestResultTests(unittest.TestCase):
             paths = []
             for name, results in files.items():
                 path = Path(directory) / name
-                path.write_text(trx(results, **self.summary), encoding="utf-8")
+                path.write_text(trx(results, runner=self.runner, **self.summary), encoding="utf-8")
                 paths.append(path)
 
             return qualification.check_tests(paths, PROJECTS, set(skips))
@@ -192,6 +203,71 @@ class TestResultTests(unittest.TestCase):
 
         # Assert
         self.assertIn("No TRX", message)
+
+    def test_skip_reason_in_the_other_runners_element_fails(self):
+        # Arrange
+        other = "mtp" if self.runner == "vstest" else "vstest"
+        self.summary = {"reason_layout": RUNNERS[other][1]}
+        files = {"unit.trx": [("Doka.Example.Tests", "Passed", None),
+                              ("Doka.Example.FunctionalTests", "NotExecuted", "reason")]}
+
+        # Act
+        message = self.failure(files, {"Doka.Example.FunctionalTests"})
+
+        # Assert
+        self.assertIn("without a reason", message)
+
+    def test_unknown_test_adapter_fails(self):
+        # Arrange
+        self.summary = {"adapter": "executor://xunit/VsTestRunner2/netcoreapp/"}
+        files = {"unit.trx": [("Doka.Example.Tests", "Passed", None), ("Doka.Example.FunctionalTests", "Passed", None)]}
+
+        # Act
+        message = self.failure(files)
+
+        # Assert
+        self.assertIn("executor://xunit/VsTestRunner2/netcoreapp/, whose TRX layout is not known", message)
+
+
+class TestingPlatformResultTests(TestResultTests):
+    runner = "mtp"
+
+
+class MeasuredTrxTests(unittest.TestCase):
+    def read(self, name):
+        return {(result["outcome"], result["reason"]) for result in qualification.read_trx(DATA / name)}
+
+    def test_vstest_file_yields_every_skip_reason(self):
+        # Arrange
+        name = "xunit-v3-vstest.trx"
+
+        # Act
+        results = self.read(name)
+
+        # Assert
+        self.assertEqual({("Passed", ""), ("NotExecuted", "static reason"), ("NotExecuted", "dynamic reason"),
+                          ("NotExecuted", "conditional reason")}, results)
+
+    def test_testing_platform_file_yields_every_skip_reason(self):
+        # Arrange
+        name = "xunit-v3-mtp.trx"
+
+        # Act
+        results = self.read(name)
+
+        # Assert
+        self.assertEqual({("Passed", ""), ("NotExecuted", "static reason"), ("NotExecuted", "dynamic reason"),
+                          ("NotExecuted", "conditional reason")}, results)
+
+    def test_xunit_v2_vstest_file_yields_its_skip_reason(self):
+        # Arrange
+        name = "xunit-v2-vstest.trx"
+
+        # Act
+        results = self.read(name)
+
+        # Assert
+        self.assertEqual({("Passed", ""), ("NotExecuted", "static reason")}, results)
 
 
 class RestoreQualificationTests(unittest.TestCase):
