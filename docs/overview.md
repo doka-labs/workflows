@@ -348,7 +348,7 @@ observed, never replaced.
 
 ```mermaid
 flowchart TB
-  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>job token: environment and defining workflow as in the policy,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
+  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>run from release.workflowPath of the policy,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
   auth --> adm[("attest release-admission-v1")]
   adm --> pending["list packages nuget.org does not hold<br/>(other bytes there: stop)"]
   pending --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]

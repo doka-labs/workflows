@@ -1,7 +1,7 @@
 name: Release Publish
 description: >-
   Publishes an approved candidate: rechecks the candidate assets against their attestations, current authority, the
-  publisher environment, the job's own identity and the signed tag, records the admission, pushes the packages that
+  publisher environment, the run's release workflow and the signed tag, records the admission, pushes the packages that
   nuget.org does not hold yet, reads them back signed with their symbols, and only then publishes the immutable
   GitHub release. A run that stopped anywhere continues from the observed state.
 
@@ -11,7 +11,9 @@ description: >-
 # it. An action does not change the job's token: actions request it through the job's ACTIONS_ID_TOKEN_REQUEST_URL,
 # and NuGet/login, itself an action of another repository, publishes MySql, SafeMigrations and NestedSet that way.
 # The caller's job sets environment, permissions, concurrency and timeout, which an action cannot set; the README's
-# publish job gives each with its reason, and the tools check environment and defining workflow from the job's token.
+# publish job gives each with its reason. nuget.org compares the token's workflow file and environment with the
+# Trusted Publishing policy; the tools check the run's release workflow and the environment's settings, and request
+# no token of their own. https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
 # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery.Services/Authentication/Federated/GitHubTokenPolicyValidator.cs
 # https://docs.github.com/en/actions/reference/security/oidc
 #
@@ -78,7 +80,7 @@ runs:
         TAG: ${{ inputs.tag }}
       run: python3 -E -s -m tools.release_publication download-candidate --tag "$TAG" --output "$RUNNER_TEMP/candidate"
 
-    - name: Recheck candidate, authority, environment, job identity and signed tag
+    - name: Recheck candidate, authority, environment, release workflow and signed tag
       id: authorize
       shell: bash
       working-directory: ${{ github.action_path }}/../../..

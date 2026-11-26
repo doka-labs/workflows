@@ -1,5 +1,3 @@
-import base64
-import io
 import json
 import os
 import subprocess
@@ -612,94 +610,18 @@ class VerifyCandidateTests(unittest.TestCase):
         self.assertIn("repeats the key schemaVersion", str(raised.exception))
 
 
-class JobIdentityTests(unittest.TestCase):
-    def setUp(self):
-        self.policy = json.loads((Path(__file__).resolve().parents[3] / "examples" / "release-policy.json").read_text())
-        self.ref = "refs/heads/main"
-        self.claims = {"repository": self.policy["repository"], "environment": self.policy["release"]["environment"],
-                       "job_workflow_ref": f"{self.policy['repository']}/{self.policy['release']['workflowPath']}"
-                                           f"@{self.ref}"}
-
-    def test_job_of_the_release_workflow_in_the_environment_passes(self):
+class OwnTokenRequestTests(unittest.TestCase):
+    def test_release_tools_request_no_oidc_token_of_their_own(self):
         # Arrange
-        expected = self.policy["release"]["environment"]
+        # WHY: Only NuGet/login and actions/attest request the job's OIDC token, as in MySql, SafeMigrations and
+        # NestedSet; the tools' own request returned HTTP 400 in Tabular's first publication (run 45886213179).
+        sources = sorted(Path(publication.__file__).parent.glob("*.py"))
 
         # Act
-        environment = publication.require_job_identity(self.policy, self.claims, self.ref)
+        readers = [path.name for path in sources if "ACTIONS_ID_TOKEN_REQUEST" in path.read_text(encoding="utf-8")]
 
         # Assert
-        self.assertEqual(expected, environment)
-
-    def test_job_of_a_reusable_workflow_from_another_repository_fails(self):
-        # Arrange
-        self.claims["job_workflow_ref"] = "doka-labs/workflows/.github/workflows/release-publish.yml@refs/tags/v0.3.0"
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            publication.require_job_identity(self.policy, self.claims, self.ref)
-
-        # Assert
-        self.assertIn("is defined by doka-labs/workflows/.github/workflows/release-publish.yml", str(raised.exception))
-
-    def test_job_without_the_publisher_environment_fails(self):
-        # Arrange
-        del self.claims["environment"]
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            publication.require_job_identity(self.policy, self.claims, self.ref)
-
-        # Assert
-        self.assertIn("runs in environment '', not in 'nuget'", str(raised.exception))
-
-    def test_job_of_another_repository_fails(self):
-        # Arrange
-        self.claims["repository"] = "doka-labs/Other"
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            publication.require_job_identity(self.policy, self.claims, self.ref)
-
-        # Assert
-        self.assertIn("runs for doka-labs/Other", str(raised.exception))
-
-    def test_claims_are_read_from_the_token_of_the_job(self):
-        # Arrange
-        payload = base64.urlsafe_b64encode(json.dumps(self.claims).encode()).decode().rstrip("=")
-        requested = []
-
-        class Response(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        def opener(request, timeout):
-            requested.append((request.full_url, request.get_header("Authorization"), timeout))
-            return Response(json.dumps({"value": f"header.{payload}.signature"}).encode())
-
-        environment = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.example/id?api-version=2.0",
-                       "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token"}
-
-        # Act
-        claims = publication.job_identity(environment, opener=opener)
-
-        # Assert
-        self.assertEqual(self.claims, claims)
-        self.assertEqual([("https://token.example/id?api-version=2.0&audience=https%3A%2F%2Fgithub.com%2Fdoka-labs"
-                           "%2Fworkflows", "bearer request-token", 30)], requested)
-
-    def test_job_without_id_token_permission_fails(self):
-        # Arrange
-        environment = {}
-
-        # Act
-        with self.assertRaises(publication.PublicationError) as raised:
-            publication.job_identity(environment, opener=None)
-
-        # Assert
-        self.assertIn("grant it id-token: write", str(raised.exception))
+        self.assertEqual([], readers)
 
 
 class AdmissionSignerTests(unittest.TestCase):

@@ -12,6 +12,19 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-26
+
+### Fixed
+
+- The publish job no longer requests an OIDC token of its own to read its
+  environment and defining workflow. That request returned HTTP 400 in the
+  first real publication (Tabular run 45886213179) and stopped it before any
+  write. As in MySql, SafeMigrations and NestedSet, only `NuGet/login` and
+  `actions/attest` request the token, and nuget.org compares its workflow
+  file and environment with the Trusted Publishing policy; the tools still
+  check the run's release workflow and the environment's reviewers and branch
+  grants.
+
 ## [0.5.0] - 2026-11-26
 
 ### Added
