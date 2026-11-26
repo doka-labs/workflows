@@ -302,6 +302,27 @@ threshold with executed lines for every package in `release.packages`.
 }
 ```
 
+The gate reads every file named `*.cobertura.xml`, or with a numeric
+timestamp before `.xml` as coverlet.MTP writes it, in the artifacts that match
+`reports-pattern`. The coverage tools of the Doka repositories write
+different reports, so the thresholds and class names of a policy hold for one
+tool only:
+
+| Tool | Runner | Report file name, measured | Nested class | Branches of the probe |
+| --- | --- | --- | --- | --- |
+| coverlet.collector | VSTest | `coverage.cobertura.xml` | `Probe.Lib.Calc/Nested` | 4/8 |
+| coverlet.MTP | Microsoft Testing Platform | `coverage.cobertura.261126103325198.xml`, with `--coverlet-file-prefix integration-mariadb` `integration-mariadb.coverage.cobertura.261126132205055.xml` | `Probe.Lib.Calc/Nested` | 4/8 |
+| Microsoft.CodeCoverage (`Format=cobertura`) | VSTest | `runner_host_2026-11-26.11_33_22.cobertura.xml` | `Probe.Lib.Calc.Nested` | 2/6 |
+
+- A critical class is matched by its exact name and counts only its own
+  lines. Nested classes and async methods are separate classes in the report,
+  for example `Probe.Lib.Calc/<LaterAsync>d__2`, and need their own entry.
+- A change of the coverage tool can change the measured branches. Check the
+  thresholds against a report of the new tool in the same pull request.
+
+The reports under `tools/coverage/tests/data` show each tool's output for the
+same probe library, `Probe.Lib`, measured with the versions listed there.
+
 ## Pull requests
 
 ### `code-style.yml`

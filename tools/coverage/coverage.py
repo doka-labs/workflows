@@ -22,6 +22,12 @@ CLASS_FIELDS = {"assembly", "name", "minimumLinePercent", "minimumBranchPercent"
 CONDITION = re.compile(r"\((\d+)/(\d+)\)")
 # WHY: A report timestamp more than five minutes in the future is invalid (MySql's FreshnessErrors).
 FUTURE_TOLERANCE_SECONDS = 300
+# WHY: coverlet.MTP 10.1.1 names its report coverage.cobertura.<timestamp>.xml, after an optional
+# --coverlet-file-prefix (measured: coverage.cobertura.261126103325198.xml,
+# integration-mariadb.coverage.cobertura.261126132205055.xml); coverlet.collector and Microsoft.CodeCoverage end in
+# .cobertura.xml. Both forms are read so no caller has to rename a report.
+# https://github.com/coverlet-coverage/coverlet
+REPORT_NAME = re.compile(r".+\.cobertura(?:\.[0-9]+)?\.xml")
 
 
 class CoverageError(RuntimeError):
@@ -92,7 +98,7 @@ def source_key(filename: str) -> str:
 
 def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tuple[str, str, int], Line]]:
     """Merge every report line by assembly, source, class and line number."""
-    reports = sorted(directory.rglob("*.cobertura.xml"))
+    reports = sorted(path for path in directory.rglob("*.xml") if REPORT_NAME.fullmatch(path.name))
     if not reports:
         raise CoverageError(f"No Cobertura reports below {directory}.")
 

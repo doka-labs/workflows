@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       reports-pattern:
-        description: Name pattern of this run's artifacts that hold *.cobertura.xml reports.
+        description: Name pattern of this run's artifacts that hold the Cobertura reports.
         type: string
         required: true
       runs-on:

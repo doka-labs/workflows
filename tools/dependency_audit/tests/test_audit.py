@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -191,6 +192,70 @@ class AuditSolutionTests(unittest.TestCase):
         # Assert
         element = ElementTree.parse(root / "audit.slnx").getroot().find("Project")
         self.assertEqual("src/R&D <x>/A.csproj", element.get("Path"))
+
+
+DATA = Path(__file__).parent / "data"
+MEASURED_PROJECTS = [Path("/work/src/Consumer/Consumer.csproj").resolve(),
+                     Path("/work/src/Direct/Direct.csproj").resolve()]
+
+
+class MeasuredListingTests(unittest.TestCase):
+    def listing(self, name):
+        return json.loads((DATA / name).read_text(encoding="utf-8"))
+
+    def test_clean_listing_of_sdk_10_passes(self):
+        # Arrange
+        report = self.listing("package-list-clean-sdk10.0.404.json")
+
+        # Act
+        count = audit.validate_report(report, MEASURED_PROJECTS)
+
+        # Assert
+        self.assertEqual(2, count)
+
+    def test_clean_listing_of_sdk_11_passes(self):
+        # Arrange
+        report = self.listing("package-list-clean-sdk11.0.100.json")
+
+        # Act
+        count = audit.validate_report(report, MEASURED_PROJECTS)
+
+        # Assert
+        self.assertEqual(2, count)
+
+    def test_vulnerable_listing_of_sdk_10_fails(self):
+        # Arrange
+        report = self.listing("package-list-vulnerable-sdk10.0.404.json")
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, MEASURED_PROJECTS)
+
+        # Assert
+        self.assertIn("System.Text.Json 8.0.0", str(raised.exception))
+
+    def test_vulnerable_listing_of_sdk_11_fails(self):
+        # Arrange
+        report = self.listing("package-list-vulnerable-sdk11.0.100.json")
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, MEASURED_PROJECTS)
+
+        # Assert
+        self.assertIn("System.Text.Json 8.0.0", str(raised.exception))
+
+    def test_vulnerable_transitive_package_alone_fails(self):
+        # Arrange
+        report = self.listing("package-list-vulnerable-sdk11.0.100.json")
+        report["projects"] = [project for project in report["projects"] if project["path"].endswith("Consumer.csproj")]
+
+        # Act
+        with self.assertRaises(audit.AuditError) as raised:
+            audit.validate_report(report, MEASURED_PROJECTS[:1])
+
+        # Assert
+        self.assertIn("System.Text.Json 8.0.0 in /work/src/Consumer/Consumer.csproj", str(raised.exception))
 
 
 if __name__ == "__main__":

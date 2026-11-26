@@ -220,5 +220,98 @@ class MethodOnlyReportTests(unittest.TestCase):
         self.assertIn("b.cobertura.xml is an empty or invalid Cobertura report", str(raised.exception))
 
 
+DATA = Path(__file__).parent / "data"
+# The measured reports under data/ were written one to five seconds before this time.
+MEASURED_NOW = 1_795_689_210
+
+
+class MeasuredReportTests(unittest.TestCase):
+    def verify(self, name, critical, stored_as="coverage.cobertura.xml"):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        Path(directory.name, stored_as).write_bytes((DATA / name).read_bytes())
+        value = {"schemaVersion": 1, "evidenceMaxAgeSeconds": 60,
+                 "assemblies": [{"name": "Probe.Lib", "minimumLinePercent": 90, "minimumBranchPercent": 30}],
+                 "criticalClasses": [{"assembly": "Probe.Lib", "name": critical, "minimumLinePercent": 100,
+                                      "minimumBranchPercent": None}]}
+        return coverage.verify(Path(directory.name), value, ["Probe.Lib"], now=MEASURED_NOW)
+
+    def test_coverlet_collector_report_passes(self):
+        # Arrange
+        name = "coverlet-collector.cobertura.xml"
+
+        # Act
+        summary = self.verify(name, "Probe.Lib.Calc/Nested")
+
+        # Assert
+        self.assertEqual(["Probe.Lib: lines 10/11 (90.91%), branches 4/8 (50.00%)",
+                          "critical class Probe.Lib.Calc/Nested: lines 1/1 (100.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_coverlet_testing_platform_report_passes(self):
+        # Arrange
+        name = "coverlet-mtp.cobertura.xml"
+
+        # Act
+        summary = self.verify(name, "Probe.Lib.Calc/Nested")
+
+        # Assert
+        self.assertEqual(["Probe.Lib: lines 10/11 (90.91%), branches 4/8 (50.00%)",
+                          "critical class Probe.Lib.Calc/Nested: lines 1/1 (100.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_microsoft_code_coverage_report_passes(self):
+        # Arrange
+        name = "microsoft-codecoverage.cobertura.xml"
+
+        # Act
+        summary = self.verify(name, "Probe.Lib.Calc.Nested")
+
+        # Assert
+        self.assertEqual(["Probe.Lib: lines 10/11 (90.91%), branches 2/6 (33.33%)",
+                          "critical class Probe.Lib.Calc.Nested: lines 1/1 (100.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_coverlet_nested_class_name_is_unknown_to_microsoft_code_coverage(self):
+        # Arrange
+        name = "microsoft-codecoverage.cobertura.xml"
+
+        # Act
+        with self.assertRaises(coverage.CoverageError) as raised:
+            self.verify(name, "Probe.Lib.Calc/Nested")
+
+        # Assert
+        self.assertIn("The reports have no class Probe.Lib.Calc/Nested.", str(raised.exception))
+
+    def test_coverlet_testing_platform_file_name_with_timestamp_is_read(self):
+        # Arrange
+        name = "coverlet-mtp.cobertura.xml"
+
+        # Act
+        summary = self.verify(name, "Probe.Lib.Calc/Nested", stored_as="coverage.cobertura.261126103325198.xml")
+
+        # Assert
+        self.assertEqual("Probe.Lib: lines 10/11 (90.91%), branches 4/8 (50.00%)", summary[0])
+
+    def test_coverlet_testing_platform_file_name_with_prefix_is_read(self):
+        # Arrange
+        name = "coverlet-mtp.cobertura.xml"
+
+        # Act
+        summary = self.verify(name, "Probe.Lib.Calc/Nested",
+                              stored_as="integration-mariadb.coverage.cobertura.261126132205055.xml")
+
+        # Assert
+        self.assertEqual("Probe.Lib: lines 10/11 (90.91%), branches 4/8 (50.00%)", summary[0])
+
+    def test_other_file_name_is_not_read(self):
+        # Arrange
+        name = "coverlet-mtp.cobertura.xml"
+
+        # Act
+        with self.assertRaises(coverage.CoverageError) as raised:
+            self.verify(name, "Probe.Lib.Calc/Nested", stored_as="coverage.cobertura.backup.xml")
+
+        # Assert
+        self.assertIn("No Cobertura reports below", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

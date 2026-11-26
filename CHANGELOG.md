@@ -32,6 +32,12 @@ entries stay under Unreleased.
   the pull request qualification and the signing setup, including
   `gpg.ssh.allowedSignersFile` for `git tag -v`; the draft checks moved to
   the `Tag check` job, and it no longer prints a tag command.
+- The `coverage-gate.yml` section of the README names how coverlet.collector,
+  coverlet.MTP and Microsoft.CodeCoverage differ in report file names, nested
+  class names and measured branches.
+- The coverage gate also reads coverlet.MTP reports under the name the tool
+  writes, `coverage.cobertura.<timestamp>.xml` with an optional prefix, so a
+  caller no longer has to rename them.
 
 ### Fixed
 
