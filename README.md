@@ -608,9 +608,10 @@ between them:
    publisher environment and calls the composite action
    `.github/actions/release-publish` of this repository. After approval it
    rechecks the assets against their attestations, the policy on `main`, the
-   environment grants, the job's own OIDC claims (the job runs in
-   `release.environment` and is defined by `release.workflowPath` of this
-   repository) and the signed tag, and attests the admission. Before
+   reviewers and branch grants of `release.environment`, that the run comes
+   from `release.workflowPath`, and the signed tag, and attests the admission.
+   The tools request no OIDC token of their own; nuget.org compares the token
+   of `NuGet/login` with the Trusted Publishing policy. Before
    pushing, it checks the existing Latest release and verifies the current
    draft assets. It pushes what nuget.org does not hold yet, reads every
    package back signed and every Portable PDB from the symbol server,
