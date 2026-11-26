@@ -12,6 +12,36 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
+### Added
+
+- The candidate and `package-check.yml` require an exact pin `[<version>]`
+  wherever a package depends on another package of the candidate whose
+  assemblies grant it their internals.
+- `release-candidate.yml` has a `Tag check` job after the SBOM jobs. It checks
+  in the release line's own run that the draft holds this run's candidate and
+  passes the publish verification, and repeats the checks before tagging.
+- `examples/pre-tag-check.sh`, copied to `eng/pre-tag-check.sh` of a product
+  repository, runs `pre-tag` with this repository at the commit the line's
+  release workflow pins, without a checkout of this repository.
+
+### Changed
+
+- `pre-tag` runs before the candidate starts and checks the line, the version,
+  the pull request qualification and the signing setup, including
+  `gpg.ssh.allowedSignersFile` for `git tag -v`; the draft checks moved to
+  the `Tag check` job, and it no longer prints a tag command.
+
+### Fixed
+
+- The qualification reads the skip reason of TRX files from the Microsoft
+  Testing Platform (`--report-xunit-trx`, `Output/StdOut`) as well as from
+  VSTest (`--logger trx`, `Output/ErrorInfo/Message`), chosen by the test
+  adapter each test names, and refuses a TRX file of an adapter whose layout is
+  not known. Before, every skip in a Microsoft Testing Platform result failed
+  as a skip without a reason.
+
 ## [0.4.0] - 2026-11-25
 
 ### Changed

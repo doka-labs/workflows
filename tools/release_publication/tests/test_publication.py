@@ -1,6 +1,8 @@
 import base64
 import io
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
@@ -1265,65 +1267,6 @@ class TagAndAdmissionTests(unittest.TestCase):
         self.assertIn("another tag object or candidate", str(raised.exception))
 
 
-class PreTagHelperTests(unittest.TestCase):
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name)
-        (self.root / ".github").mkdir()
-        (self.root / publication.ALLOWED_SIGNERS).write_text("dev@example ssh-ed25519 AAAAKEY\n", encoding="utf-8")
-
-    def tearDown(self):
-        self.directory.cleanup()
-
-    def test_registered_public_key_file_passes(self):
-        # Arrange
-        (self.root / "id.pub").write_text("ssh-ed25519 AAAAKEY dev@example\n", encoding="utf-8")
-
-        # Act
-        registered = publication.signing_key_registered(self.root, str(self.root / "id.pub"))
-
-        # Assert
-        self.assertTrue(registered)
-
-    def test_private_key_path_uses_its_public_key(self):
-        # Arrange
-        (self.root / "id").write_text("private", encoding="utf-8")
-        (self.root / "id.pub").write_text("ssh-ed25519 AAAAKEY dev@example\n", encoding="utf-8")
-
-        # Act
-        registered = publication.signing_key_registered(self.root, str(self.root / "id"))
-
-        # Assert
-        self.assertTrue(registered)
-
-    def test_unregistered_key_fails(self):
-        # Arrange
-        key = "key::ssh-ed25519 OTHERKEY"
-
-        # Act
-        registered = publication.signing_key_registered(self.root, key)
-
-        # Assert
-        self.assertFalse(registered)
-
-    def test_origin_url_forms_name_the_repository(self):
-        # Arrange
-        urls = ["git@github.com:doka-labs/Example.git", "https://github.com/doka-labs/Example"]
-        original = publication.run
-        results = []
-
-        # Act
-        try:
-            for url in urls:
-                publication.run = lambda command, url=url, **kwargs: url + "\n"
-                results.append(publication.repository_of(Path(".")))
-        finally:
-            publication.run = original
-
-        # Assert
-        self.assertEqual(["doka-labs/Example", "doka-labs/Example"], results)
-
-
 class PublishCurrentDraftTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -1498,19 +1441,11 @@ class ProbeConsistencyTests(unittest.TestCase):
         self.assertIn("expect different bytes at one URL", str(raised.exception))
 
 
-class PreTagReportTests(unittest.TestCase):
-    def run_pre_tag(self, *, immutable=None, status="", gpg_format="ssh", repository=REPOSITORY, failure=None):
-        from unittest import mock
-
-        commands = {("status",): status, ("branch",): "main\n", ("rev-parse",): f"{COMMIT}\n"}
-        manifest = json.dumps({"commit": COMMIT, "version": "1.2.3"}).encode()
+class TagReadinessTests(unittest.TestCase):
+    def run_check(self, *, tag_taken=False, other_tags=(), taken=False, draft_commit=COMMIT, failure=None,
+                  signers="principal namespaces=\"git\" ssh-ed25519 K\n"):
+        manifest = json.dumps({"commit": draft_commit, "version": "1.2.3"}).encode()
         checked = []
-        config = {"gpg.format": gpg_format, "user.signingkey": "key::ssh-ed25519 K"}
-
-        def origin(root):
-            if repository is None:
-                raise publication.PublicationError("origin is not a GitHub repository.")
-            return repository
 
         def complete(api, repository, release, verify=None):
             checked.append(release["id"])
@@ -1518,22 +1453,18 @@ class PreTagReportTests(unittest.TestCase):
                 raise failure
 
         patches = {
-            "repository_of": origin, "release_notes": lambda root, version: "notes",
-            "run": lambda command, **kwargs: commands[(command[3],)],
-            "git_config": lambda root, key: config[key],
+            "release_notes": lambda root, version: "notes", "run": lambda command, **kwargs: signers,
             "observe_authority": lambda api, repository: {"policy": {"release": {"packages": ["Doka.Core"]}}},
-            "protected_head": lambda api, repository, ref: COMMIT, "tag_exists": lambda api, repository, tag: False,
-            "tags_on_commit": lambda root, commit: [],
+            "tag_exists": lambda api, repository, tag: tag_taken,
+            "tags_on_commit": lambda root, commit: list(other_tags),
             "release_for": lambda api, repository, tag: {"id": 7, "draft": True, "tag_name": tag},
             "release_assets": lambda api, repository, release: {publication.CANDIDATE: {"id": 1, "size": 1}},
-            "asset_bytes": lambda repository, asset: manifest, "require_complete_draft": complete,
-            "signing_key_registered": lambda root, key: True}
-        routes = {} if immutable == "missing" else {
-            f"repos/{REPOSITORY}/immutable-releases": {"enabled": immutable is None}}
-        with mock.patch.multiple(publication, **patches), \
-                mock.patch.object(publication.policies, "select_line", return_value={}), \
-                mock.patch.object(publication.nuget, "unused", return_value={"Doka.Core": "absent"}):
-            result = publication.pre_tag(FakeApi(routes), Path("."), "1.2.3")
+            "asset_bytes": lambda repository, asset: manifest, "require_complete_draft": complete}
+        environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": COMMIT}
+        with unittest.mock.patch.multiple(publication, **patches), \
+                unittest.mock.patch.object(publication.nuget, "unused",
+                                           return_value={"Doka.Core": "listed" if taken else "absent"}):
+            result = publication.tag_readiness(None, environment, Path("."), "1.2.3")
 
         return result, checked
 
@@ -1541,94 +1472,75 @@ class PreTagReportTests(unittest.TestCase):
     def failed(result):
         return {item["subject"]: item["detail"] for item in result["checks"] if not item["ok"]}
 
-    def test_passing_checks_report_every_check_and_the_tag_command(self):
+    def test_passing_checks_report_every_check(self):
         # Arrange
-        expected = f'git tag -s v1.2.3 {COMMIT} -m "v1.2.3"'
+        expected = list(publication.TAG_READINESS_CHECKS)
 
         # Act
-        result, checked = self.run_pre_tag()
+        result, checked = self.run_check()
 
         # Assert
-        self.assertEqual(list(publication.PRE_TAG_CHECKS), [item["subject"] for item in result["checks"]])
-        self.assertEqual(0, result["failures"])
-        self.assertEqual(expected, result["command"])
+        self.assertEqual(expected, [item["subject"] for item in result["checks"]])
+        self.assertEqual((0, "v1.2.3", COMMIT), (result["failures"], result["tag"], result["commit"]))
         self.assertEqual([7], checked)
-
-    def test_disabled_immutable_releases_fail_with_a_remedy_and_the_other_checks_still_run(self):
-        # Arrange
-        subject = "Immutable releases"
-
-        # Act
-        result, checked = self.run_pre_tag(immutable="disabled")
-
-        # Assert
-        self.assertEqual({subject}, set(self.failed(result)))
-        self.assertIn("Immutable releases are not enabled", self.failed(result)[subject])
-        self.assertIn("Enable immutable releases", self.failed(result)[subject])
-        self.assertNotIn("command", result)
-        self.assertEqual([7], checked)
-
-    def test_missing_immutable_setting_fails(self):
-        # Arrange
-        subject = "Immutable releases"
-
-        # Act
-        result, _ = self.run_pre_tag(immutable="missing")
-
-        # Assert
-        self.assertIn("Immutable releases are not enabled", self.failed(result)[subject])
 
     def test_independent_failures_are_all_reported(self):
         # Arrange
-        expected = {"Clean checkout", "SSH signing format"}
+        expected = {"Tag unused", "Version unused on nuget.org", "Allowed signers listed"}
 
         # Act
-        result, _ = self.run_pre_tag(status=" M README.md\n", gpg_format="openpgp")
+        result, checked = self.run_check(tag_taken=True, taken=True, signers="# no key yet\n")
 
         # Assert
         self.assertEqual(expected, set(self.failed(result)))
-        self.assertEqual(2, result["failures"])
-        self.assertIn("Run: git config gpg.format ssh", self.failed(result)["SSH signing format"])
+        self.assertIn("Choose the next version.", self.failed(result)["Tag unused"])
+        self.assertEqual([7], checked)
 
-    def test_failed_input_marks_its_dependent_checks_as_not_checked(self):
+    def test_commit_with_another_version_tag_fails(self):
         # Arrange
-        dependent = {"Immutable releases", "Protected line head", "Tag unused", "No other tag on the commit",
-                     "Version unused on nuget.org", "Draft holds this commit's candidate",
-                     "Draft passes publish verification"}
+        other_tags = ("v1.2.2",)
 
         # Act
-        result, checked = self.run_pre_tag(repository=None)
+        result, _ = self.run_check(other_tags=other_tags)
+
+        # Assert
+        self.assertIn("already carries the tags v1.2.2", self.failed(result)["No other tag on the commit"])
+
+    def test_draft_of_another_commit_marks_its_verification_as_not_checked(self):
+        # Arrange
+        draft_commit = "b" * 40
+
+        # Act
+        result, checked = self.run_check(draft_commit=draft_commit)
 
         # Assert
         failed = self.failed(result)
-        self.assertEqual({"Origin repository", *dependent}, set(failed))
-        self.assertTrue(all(failed[name].startswith("Not checked: needs ") for name in dependent))
+        self.assertIn(f"built from {draft_commit}, not from {COMMIT}", failed["Draft holds this run's candidate"])
+        self.assertTrue(failed["Draft passes publish verification"].startswith("Not checked: needs release"))
         self.assertEqual([], checked)
-        self.assertEqual(len(publication.PRE_TAG_CHECKS), len(result["checks"]))
+        self.assertEqual(len(publication.TAG_READINESS_CHECKS), len(result["checks"]))
 
-    def test_draft_failing_verification_gets_no_tag_command(self):
+    def test_draft_failing_verification_fails(self):
         # Arrange
         failure = publication.PublicationError("The draft of v1.2.3 cannot be published (No SBOM attestation).")
 
         # Act
-        result, _ = self.run_pre_tag(failure=failure)
+        result, _ = self.run_check(failure=failure)
 
         # Assert
         self.assertIn("No SBOM attestation", self.failed(result)["Draft passes publish verification"])
-        self.assertNotIn("command", result)
 
 
-class PreTagCommandTests(unittest.TestCase):
+class TagReportTests(unittest.TestCase):
     def report(self, failures):
         from tools.release_publication import __main__ as cli
 
-        checks = [{"subject": name, "ok": True, "detail": ""} for name in publication.PRE_TAG_CHECKS]
+        checks = [{"subject": name, "ok": True, "detail": ""} for name in publication.TAG_READINESS_CHECKS]
         if failures:
-            checks[3] = {"subject": checks[3]["subject"], "ok": False, "detail": "The checkout has changes."}
-        result = {"tag": "v1.2.3", "commit": COMMIT, "checks": checks, "failures": failures}
-        if not failures:
-            result["command"] = f'git tag -s v1.2.3 {COMMIT} -m "v1.2.3"'
-        return cli._pre_tag_report(result)
+            checks[1] = {"subject": checks[1]["subject"], "ok": False, "detail": "v1.2.3 already exists."}
+        result = {"repository": REPOSITORY, "tag": "v1.2.3", "commit": COMMIT, "checks": checks,
+                  "failures": failures}
+        return cli._tag_report(result)
 
     def test_failed_report_names_the_failure_and_forbids_the_tag(self):
         # Arrange
@@ -1638,12 +1550,12 @@ class PreTagCommandTests(unittest.TestCase):
         text = self.report(failures)
 
         # Assert
-        self.assertIn("  FAIL  Clean checkout", text)
-        self.assertIn(f"1 of {len(publication.PRE_TAG_CHECKS)} checks failed", text)
+        self.assertIn("FAIL  Tag unused", text)
+        self.assertIn(f"1 of {len(publication.TAG_READINESS_CHECKS)} checks failed", text)
         self.assertIn("do not create the tag", text)
         self.assertNotIn("git tag -s", text)
 
-    def test_passing_report_prints_the_tag_and_push_commands(self):
+    def test_passing_report_names_the_next_step_without_commands(self):
         # Arrange
         failures = 0
 
@@ -1651,9 +1563,201 @@ class PreTagCommandTests(unittest.TestCase):
         text = self.report(failures)
 
         # Assert
-        self.assertEqual(len(publication.PRE_TAG_CHECKS), text.count("\n  OK    "))
-        self.assertIn(f'  git tag -s v1.2.3 {COMMIT} -m "v1.2.3"', text)
-        self.assertIn("  git push origin v1.2.3", text)
+        self.assertIn(f"All {len(publication.TAG_READINESS_CHECKS)} checks passed", text)
+        self.assertIn(f"signed tag v1.2.3 on {COMMIT}", text)
+        self.assertNotIn("```sh", text)
+
+
+class PreTagTests(unittest.TestCase):
+    """Runs the local check in a real repository with real SSH keys and an isolated Git configuration."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.work = Path(directory.name).resolve()
+        isolated = unittest.mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        isolated.start()
+        self.addCleanup(isolated.stop)
+        self.keys = {}
+        for name in ("listed", "other"):
+            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", name, "-f", str(self.work / name)],
+                           check=True, timeout=60)
+            self.keys[name] = " ".join((self.work / f"{name}.pub").read_text(encoding="ascii").split()[:2])
+
+        self.root = self.work / "repository"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(self.root)], check=True, timeout=60)
+        for key, value in (("user.name", "Probe"), ("user.email", "probe@example.invalid"),
+                           ("commit.gpgsign", "false"), ("remote.origin.url", f"https://github.com/{REPOSITORY}")):
+            self.git("config", key, value)
+        (self.root / ".github").mkdir()
+        (self.root / publication.ALLOWED_SIGNERS).write_text(
+            f'probe@example.invalid namespaces="git" {self.keys["listed"]}\n', encoding="ascii")
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n\n## [1.2.3] - 2026-11-26\n\n- First.\n",
+                                                encoding="ascii")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "init")
+        self.commit = self.git("rev-parse", "HEAD")
+        signers = self.work / "allowed_signers"
+        signers.write_text(f'probe@example.invalid namespaces="git" {self.keys["listed"]}\n', encoding="ascii")
+        self.signing = {"gpg.format": "ssh", "user.signingkey": str(self.work / "listed.pub"),
+                        "gpg.ssh.allowedSignersFile": str(signers)}
+
+    def git(self, *arguments, check=True):
+        result = subprocess.run(["git", "-C", str(self.root), *arguments], capture_output=True, text=True,
+                                timeout=120, check=False)
+        if check and result.returncode:
+            raise AssertionError(result.stderr)
+        return result.stdout.strip() if check else result
+
+    def run_check(self, *, signing=None, tag_taken=False, taken=False, qualified=True, immutable=True):
+        for key, value in (self.signing if signing is None else signing).items():
+            self.git("config", key, value)
+
+        class Api:
+            def request(self, route, *arguments, **keywords):
+                assert route == f"repos/{REPOSITORY}/immutable-releases", route
+                return {"enabled": immutable}
+
+        def gates(root, repository, tree, source_ref, policy, verify=None):
+            if not qualified:
+                raise publication.qualification.QualificationError(f"No pull request into {source_ref} qualified "
+                                                                   f"tree {tree} with .github/workflows/ci.yml.")
+            return [{"name": "required / Required"}]
+
+        policy = {"release": {"packages": ["Doka.Core"]}}
+        with unittest.mock.patch.multiple(
+                publication, observe_authority=lambda api, repository: {"policy": policy},
+                protected_head=lambda api, repository, ref: self.commit,
+                tag_exists=lambda api, repository, tag: tag_taken,
+                tags_on_commit=lambda root, commit: []), \
+                unittest.mock.patch.object(publication.policies, "select_line"), \
+                unittest.mock.patch.object(publication.qualification, "protected_gates", gates), \
+                unittest.mock.patch.object(publication.nuget, "unused",
+                                           return_value={"Doka.Core": "listed" if taken else "absent"}):
+            return publication.pre_tag(Api(), self.root, "1.2.3")
+
+    @staticmethod
+    def failed(result):
+        return {item["subject"]: item["detail"] for item in result["checks"] if not item["ok"]}
+
+    def test_ready_checkout_passes_every_check_and_the_runbook_tag_verifies(self):
+        # Arrange
+        expected = list(publication.PRE_TAG_CHECKS)
+
+        # Act
+        result = self.run_check()
+        self.git("tag", "-s", "v1.2.3", self.commit, "-m", "v1.2.3")
+        verified = self.git("tag", "-v", "v1.2.3", check=False)
+
+        # Assert
+        self.assertEqual(expected, [item["subject"] for item in result["checks"]])
+        self.assertEqual((0, "v1.2.3", self.commit), (result["failures"], result["tag"], result["commit"]))
+        self.assertEqual(0, verified.returncode, verified.stderr)
+        self.assertIn('Good "git" signature for probe@example.invalid', verified.stderr)
+
+    def test_unlisted_signing_key_fails_both_signer_checks_and_git_tag_v(self):
+        # Arrange
+        signing = {**self.signing, "user.signingkey": str(self.work / "other.pub")}
+
+        # Act
+        result = self.run_check(signing=signing)
+        self.git("tag", "-s", "v1.2.3", self.commit, "-m", "v1.2.3")
+        verified = self.git("tag", "-v", "v1.2.3", check=False)
+
+        # Assert
+        self.assertEqual({"Signing key allowed", "Signer file for git tag -v"}, set(self.failed(result)))
+        self.assertNotEqual(0, verified.returncode)
+        self.assertIn("No principal matched", verified.stderr)
+
+    def test_literal_signing_key_is_read(self):
+        # Arrange
+        signing = {**self.signing, "user.signingkey": f"key::{self.keys['listed']}"}
+
+        # Act
+        result = self.run_check(signing=signing)
+
+        # Assert
+        self.assertEqual({}, self.failed(result))
+
+    def test_missing_signing_setup_names_each_setting(self):
+        # Arrange
+        signing = {"commit.gpgsign": "false"}
+
+        # Act
+        result = self.run_check(signing=signing)
+
+        # Assert
+        failed = self.failed(result)
+        self.assertIn("gpg.format is not ssh.", failed["SSH signing format"])
+        self.assertIn("user.signingkey is not set.", failed["Signing key configured"])
+        self.assertTrue(failed["Signing key allowed"].startswith("Not checked: needs key"))
+        self.assertTrue(failed["Signer file for git tag -v"].startswith("Not checked: needs key"))
+
+    def test_uncommitted_file_fails_the_clean_checkout(self):
+        # Arrange
+        (self.root / "notes.txt").write_text("draft\n", encoding="ascii")
+
+        # Act
+        result = self.run_check()
+
+        # Assert
+        self.assertEqual({"Clean checkout"}, set(self.failed(result)))
+
+    def test_independent_failures_are_all_reported(self):
+        # Arrange
+        expected = {"Immutable releases", "Tag unused", "Version unused on nuget.org", "Pull request qualification"}
+
+        # Act
+        result = self.run_check(tag_taken=True, taken=True, qualified=False, immutable=False)
+
+        # Assert
+        failed = self.failed(result)
+        self.assertEqual(expected, set(failed))
+        self.assertIn("Merge the change through a pull request", failed["Pull request qualification"])
+        self.assertEqual(len(publication.PRE_TAG_CHECKS), len(result["checks"]))
+
+    def test_missing_changelog_section_fails(self):
+        # Arrange
+        (self.root / "CHANGELOG.md").write_text("# Changelog\n", encoding="ascii")
+        self.git("commit", "-q", "-am", "drop section")
+        self.commit = self.git("rev-parse", "HEAD")
+
+        # Act
+        result = self.run_check()
+
+        # Assert
+        self.assertEqual({"Changelog section"}, set(self.failed(result)))
+
+
+class PreTagReportTests(unittest.TestCase):
+    def report(self, failures):
+        from tools.release_publication import __main__ as cli
+
+        checks = [{"subject": name, "ok": True, "detail": ""} for name in publication.PRE_TAG_CHECKS]
+        if failures:
+            checks[0] = {"subject": checks[0]["subject"], "ok": False, "detail": "Add the section."}
+        return cli._pre_tag_report({"tag": "v1.2.3", "commit": COMMIT, "checks": checks, "failures": failures})
+
+    def test_failed_report_forbids_the_start(self):
+        # Arrange
+        failures = 1
+
+        # Act
+        text = self.report(failures)
+
+        # Assert
+        self.assertIn("FAIL  Changelog section", text)
+        self.assertIn(f"1 of {len(publication.PRE_TAG_CHECKS)} checks failed. Fix them before you start", text)
+
+    def test_passing_report_names_the_start(self):
+        # Arrange
+        failures = 0
+
+        # Act
+        text = self.report(failures)
+
+        # Assert
+        self.assertIn(f"All {len(publication.PRE_TAG_CHECKS)} checks passed. Start the release candidate", text)
 
 
 class PackageCheckCommandTests(unittest.TestCase):

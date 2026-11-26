@@ -211,3 +211,45 @@ jobs:
         with:
           subject-path: ${{ runner.temp }}/packages/${{ matrix.package }}.${{ inputs.version }}.nupkg
           sbom-path: ${{ runner.temp }}/packages/${{ matrix.package }}.spdx.json
+
+  # WHY: Everything the signed tag needs is checked here, in the release line's own run, so the checks always come
+  # from the workflows version that line pins; the maintainer's machine only signs, verifies and pushes the tag
+  # with git. It runs after the SBOM jobs because the draft is complete only once their attestations exist.
+  tag-check:
+    name: Tag check
+    needs: [candidate, sbom]
+    # WHY: As in the preflight: "Only users with push access will receive listings for draft releases", and the
+    # draft verification lists the attestations of its assets, which needs attestations read.
+    # https://docs.github.com/en/rest/releases/releases#list-releases
+    # https://docs.github.com/en/rest/repos/attestations#list-attestations
+    permissions:
+      contents: write
+      attestations: read
+    runs-on: ${{ inputs.runs-on }}
+    # WHY: A bound against hangs: the check runs the draft verification of the preflight, whose jobs took at most
+    # 0.8 minutes in 32 runs; 10 minutes is the preflight's limit.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: repository
+
+      - name: Check out the release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      - name: Check that the candidate commit can be tagged
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python3 -E -s -m tools.release_publication tag-readiness --root "$GITHUB_WORKSPACE/repository"
+          --version "$VERSION"

@@ -370,23 +370,9 @@ def verify_pr_qualification(subject: Path, repository: str, tree: str, source_re
     return attestation.latest(matching)
 
 
-def qualify(api, environment: dict, root: Path, *, version: str, qualification_only: bool, trx_dir: Path,
-            output: Path, verify=attestation.verify) -> dict:
-    """Qualify the checked-out candidate and write the subject and both predicates; return a summary."""
-    repository = environment.get("GITHUB_REPOSITORY", "")
-    source_ref = environment.get("GITHUB_REF", "")
-    commit = environment.get("GITHUB_SHA", "")
-    if git_tree(root, "HEAD") != git_tree(root, commit):
-        raise QualificationError("The checkout is not the commit of this run.")
-
-    from tools.release_lines.coordinator import observe_authority
-
-    authority = observe_authority(api, repository)
-    policy = authority["policy"]
-    snapshot = policies.freeze_line(policy, source_ref, version, policy_commit=authority["commit"],
-                                    qualification_only=qualification_only)
-    tree = git_tree(root, commit)
-    subject = attestation.tree_subject(output, tree)
+def protected_gates(root: Path, repository: str, tree: str, source_ref: str, policy: dict, *,
+                    verify=attestation.verify) -> list[dict]:
+    """Return every protected-check gate of the policy with the pull request qualification that attested it."""
     gates = []
     protected = {}
     for gate in policy["qualification"]["gates"]:
@@ -404,6 +390,27 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
                       "attempt": pr["attempt"], "pullRequest": pr["predicate"].get("pullRequest"),
                       "tree": pr["predicate"].get("tree"), "documentationTrees": chain} for name in names)
 
+    return gates
+
+
+def qualify(api, environment: dict, root: Path, *, version: str, qualification_only: bool, trx_dir: Path,
+            output: Path, verify=attestation.verify) -> dict:
+    """Qualify the checked-out candidate and write the subject and both predicates; return a summary."""
+    repository = environment.get("GITHUB_REPOSITORY", "")
+    source_ref = environment.get("GITHUB_REF", "")
+    commit = environment.get("GITHUB_SHA", "")
+    if git_tree(root, "HEAD") != git_tree(root, commit):
+        raise QualificationError("The checkout is not the commit of this run.")
+
+    from tools.release_lines.coordinator import observe_authority
+
+    authority = observe_authority(api, repository)
+    policy = authority["policy"]
+    snapshot = policies.freeze_line(policy, source_ref, version, policy_commit=authority["commit"],
+                                    qualification_only=qualification_only)
+    tree = git_tree(root, commit)
+    subject = attestation.tree_subject(output, tree)
+    gates = protected_gates(root, repository, tree, source_ref, policy, verify=verify)
     produced = [gate["name"] for gate in policy["qualification"]["gates"] if gate["kind"] == "candidate-produced"]
     foreign = sorted(gate["name"] for gate in policy["qualification"]["gates"]
                      if gate["kind"] == "candidate-produced" and gate["workflow"] != workflow_path(environment))

@@ -32,23 +32,38 @@ def _summary(text: str) -> None:
             stream.write(text + "\n")
 
 
-def _pre_tag_report(result: dict) -> str:
-    """Return the readable report of a pre-tag check: one line per check, the count, and the next step."""
+def _check_lines(result: dict) -> list[str]:
+    """Return one aligned OK or FAIL line per check."""
     width = max(len(item["subject"]) for item in result["checks"])
-    lines = [f"Pre-tag check for {result['tag']}", ""]
-    lines += [f"  {'OK' if item['ok'] else 'FAIL':<5} {item['subject']:<{width}}  {item['detail']}".rstrip()
-              for item in result["checks"]]
-    total = len(result["checks"])
-    lines.append("")
-    if result["failures"]:
-        lines.append(f"{result['failures']} of {total} checks failed. Fix them and run the check again; "
-                     "do not create the tag.")
-    else:
-        lines += [f"All {total} checks passed. In the product checkout, run:", "",
-                  f"  {result['command']}", f"  git push origin {result['tag']}", "",
-                  "Then approve the waiting publication in the release environment."]
+    return [f"{'OK' if item['ok'] else 'FAIL':<5} {item['subject']:<{width}}  {item['detail']}".rstrip()
+            for item in result["checks"]]
 
-    return "\n".join(lines)
+
+def _tag_report(result: dict) -> str:
+    """Return the Markdown summary of the tag check in the release run: one line per check and the next step."""
+    lines = [f"## Tag check for {result['tag']}", "", "```text", *_check_lines(result), "```", ""]
+    total = len(result["checks"])
+    if result["failures"]:
+        lines.append(f"{result['failures']} of {total} checks failed. Fix them and run the candidate again; do not "
+                     "create the tag.")
+    else:
+        lines.append(f"All {total} checks passed. Create, verify and push the signed tag {result['tag']} on "
+                     f"{result['commit']} as the release runbook describes, then approve the waiting publication.")
+
+    return "\n".join(lines) + "\n"
+
+
+def _pre_tag_report(result: dict) -> str:
+    """Return the plain text report of the local check before the candidate starts."""
+    lines = [f"Pre-tag check for {result['tag']}", "", *_check_lines(result), ""]
+    total = len(result["checks"])
+    if result["failures"]:
+        lines.append(f"{result['failures']} of {total} checks failed. Fix them before you start the candidate.")
+    else:
+        lines.append(f"All {total} checks passed. Start the release candidate for {result['tag']} on "
+                     f"{result['commit']}.")
+
+    return "\n".join(lines) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,12 +106,13 @@ def main(argv: list[str] | None = None) -> int:
     extract.add_argument("--package", required=True)
     extract.add_argument("--packages", type=Path, required=True)
     pre_tag = commands.add_parser(
-        "pre-tag", help="Check locally that the checkout can be tagged; no writes.",
-        description="Run every check that must pass before the signed release tag is created, from a checkout of "
-                    "doka-labs/workflows. Each check prints OK or FAIL with a remedy; nothing is written. Exit code "
-                    "0 means the printed tag command may be run, 1 means at least one check failed.")
-    pre_tag.add_argument("--root", type=Path, default=Path.cwd(), help="Checkout of the product repository.")
-    pre_tag.add_argument("--version", required=True, help="Version to tag, without the leading v.")
+        "pre-tag", help="Check locally, before the candidate starts, that the checkout can be released; no writes.")
+    pre_tag.add_argument("--root", type=Path, required=True, help="Checkout of the product repository.")
+    pre_tag.add_argument("--version", required=True, help="Version to release, without the leading v.")
+    readiness = commands.add_parser(
+        "tag-readiness", help="Check in the release run that the candidate commit can be tagged; no writes.")
+    readiness.add_argument("--root", type=Path, required=True, help="Checkout of the product repository.")
+    readiness.add_argument("--version", required=True, help="Version to tag, without the leading v.")
     stage = commands.add_parser("stage")
     stage.add_argument("--candidate", type=Path, required=True)
     recheck = commands.add_parser("recheck")
@@ -174,13 +190,8 @@ def main(argv: list[str] | None = None) -> int:
                                              output=args.output.resolve())
             publication.write_sbom_handoff(manifest, args.output.resolve(), args.handoff.resolve())
             _output("packages", json.dumps([item["id"] for item in manifest["packages"]]))
-            # WHY: Python -m imports from the current directory, while pre-tag must inspect the product checkout.
-            # https://docs.python.org/3/using/cmdline.html#cmdoption-m
-            _summary(f"## Release candidate {manifest['version']}\n\nFrom the workflows checkout, run:\n\n"
-                     f"```sh\npython3 -E -s -m tools.release_publication pre-tag "
-                     f"--root /path/to/product-checkout --version {manifest['version']}\n```\n\n"
-                     "Run the tag command printed by pre-tag in the product checkout, push the tag to origin, "
-                     "then approve the publication.\n")
+            _summary(f"## Release candidate {manifest['version']}\n\nThe draft holds the candidate. The tag check "
+                     "after the SBOM jobs decides whether the signed tag may be created.\n")
             return 0
 
         if args.command == "sbom-extract":
@@ -190,7 +201,14 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "pre-tag":
             result = publication.pre_tag(api, args.root.resolve(), args.version)
-            print(_pre_tag_report(result))
+            print(_pre_tag_report(result), end="")
+            return 1 if result["failures"] else 0
+
+        if args.command == "tag-readiness":
+            result = publication.tag_readiness(api, environment, args.root.resolve(), args.version)
+            report = _tag_report(result)
+            print(report)
+            _summary(report)
             return 1 if result["failures"] else 0
 
         if args.command == "stage":

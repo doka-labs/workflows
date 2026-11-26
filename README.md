@@ -174,13 +174,17 @@ line.
 `.github/dependabot.yml` is generated from `.github/dependabot-template.yml`
 (one entry per ecosystem and directory, without `target-branch`) and the active
 lines: every entry once per active line, the SDK without major updates, and the
-framework and ceiling packages below the line's next major. Generate it with:
+framework and ceiling packages below the line's next major. A pull request that
+changes the lines needs no local tool: `release-policy-check.yml` fails while
+the file differs and writes the expected file to its job summary, to be
+committed as it is. The same output comes from
 
 ```sh
 python3 -E -s -m tools.release_lines render-dependabot --root <product-repository> > <product-repository>/.github/dependabot.yml
 ```
 
-run from a checkout of this repository.
+in a checkout of this repository at the version `main` of the product
+repository pins.
 
 ### `release-policy-check.yml`
 
@@ -312,9 +316,9 @@ changing files: `dotnet format <solution> style --severity warn
 
 Checks the packages of a pull request with the candidate's checks, without
 writing anything: package identity and source binding, exactly the packages
-of `release.packages`, Portable PDBs against their assemblies, an isolated
-consumer per package that must restore the exact bytes, and a validated SBOM
-per package. The caller's build job uploads every `.nupkg` and `.snupkg` as
+of `release.packages`, Portable PDBs against their assemblies, the exact pin
+between packages that share internals, an isolated consumer per package that
+must restore the exact bytes, and a validated SBOM per package. The caller's build job uploads every `.nupkg` and `.snupkg` as
 one artifact and passes the packed version.
 
 ### `pr-assign.yml`
@@ -523,10 +527,26 @@ again.
 
 ## Releases
 
-One `release-candidate.yml` per product repository, started by
-`workflow_dispatch` on a release line with the version. It calls these
-workflows, with the repository's own build, test and package jobs between
-them:
+Before a release, the maintainer checks the release line on their own machine
+with `eng/pre-tag-check.sh VERSION` in the product repository, a copy of
+`examples/pre-tag-check.sh`. The script reads the one `doka-labs/workflows`
+commit that the line's `release-candidate.yml` pins, fetches exactly that
+commit into a temporary directory and runs `python3 -m tools.release_publication
+pre-tag` there, so each line checks with its own version and no checkout of
+this repository is needed. It needs `git`, a signed-in `gh` and `python3`,
+writes nothing, and reports one line `OK` or `FAIL` with a remedy per check:
+the changelog section, the origin repository, immutable releases, a clean
+checkout on the current head of the line, the tag and the version unused, no
+other version tag on the commit, the pull request qualification of the
+commit's tree, and the signing setup (`gpg.format` ssh, `user.signingkey`, the
+key in `.github/allowed_signers` of the commit and in
+`gpg.ssh.allowedSignersFile` for `git tag -v`). A check whose input failed
+says what it waits for.
+
+The release itself is one `release-candidate.yml` per product repository,
+started by `workflow_dispatch` on a release line with the version. It calls
+these workflows, with the repository's own build, test and package jobs
+between them:
 
 1. `release-preflight.yml`: the run is on the current head of a line that may
    qualify or publish the version, and `CHANGELOG.md` has a dated section for
@@ -546,20 +566,23 @@ them:
    SBOM per package from that consumer with `sbom-tool` 4.1.5 and validates it,
    verifies each Portable PDB against its assembly (`tools/NuGetSymbols`),
    attests build provenance and the SBOMs, and stores the candidate as a draft
-   release. The job summary shows the command to tag the commit.
-5. From a checkout of this repository, the maintainer runs
-   `python3 -E -s -m tools.release_publication pre-tag --root /path/to/product-checkout --version <version>`.
-   The command checks that immutable releases are enabled, the product checkout
-   is clean and on the current head of the protected line, the tag and
-   version unused, the draft's candidate built from this commit and passing the
-   publish job's verification, SSH signing configured with a key listed in
-   `.github/allowed_signers`. Every check runs, also after a failure, and
-   prints one line `OK` or `FAIL` with a remedy; a check whose input failed
-   says what it waits for. The command writes nothing and exits with 1 when a
-   check failed; when all pass it prints the tag and push commands. Then the
-   maintainer creates and pushes the SSH-signed annotated tag `v<version>`. A
-   pushed tag blocks a new candidate for its version; a broken candidate is
-   deleted before tagging, not after.
+   release. It requires an exact pin `[<version>]` wherever a package depends
+   on another package of the candidate whose assemblies grant it their
+   internals (`InternalsVisibleTo`).
+5. The `Tag check` job of `release-candidate.yml`, after the SBOM jobs, checks
+   in the same run, and so with the `doka-labs/workflows` version the release
+   line pins: the changelog section, the tag and the version still unused, no
+   other version tag on the commit, the draft holding this run's candidate and
+   passing the publish job's verification, and a key in
+   `.github/allowed_signers` of the commit. The draft exists only in this run,
+   and the other checks are repeated because the line or nuget.org can change
+   after the local check. Its summary lists one line `OK` or `FAIL` per check.
+   When all pass and the publish job waits for approval, the maintainer
+   creates the SSH-signed annotated tag `v<version>` on the candidate commit in
+   their checkout of the line, verifies it with `git tag -v` and pushes only
+   that tag. Until the push the tag is local and can be deleted; a pushed tag
+   blocks a new candidate for its version, so a broken candidate is deleted
+   before tagging, not after.
 6. The `publish` job of the repository's release workflow runs in the
    publisher environment and calls the composite action
    `.github/actions/release-publish` of this repository. After approval it
@@ -593,9 +616,9 @@ secret `NUGET_USER`.
 
 The job token cannot read whether immutable releases are enabled: the setting
 needs the Administration permission, which a `GITHUB_TOKEN` never has. Enforce
-it for the product repository in the organization settings; `pre-tag` checks it
-with the maintainer's credentials, and the publish job fails when the published
-release is not immutable.
+it for the product repository in the organization settings; `pre-tag` reads it
+with the maintainer's credentials, and the publish job fails when the
+published release is not immutable.
 
 ```yaml
 name: Release Candidate
@@ -687,7 +710,7 @@ jobs:
     # readback alone may wait one hour. 180 minutes is NestedSet's limit.
     timeout-minutes: 180
     steps:
-      - uses: doka-labs/workflows/.github/actions/release-publish@<commit-sha> # v0.4.0
+      - uses: doka-labs/workflows/.github/actions/release-publish@<commit-sha> # v0.5.0
         with:
           tag: ${{ needs.preflight.outputs.tag }}
           nuget-user: ${{ secrets.NUGET_USER }}
