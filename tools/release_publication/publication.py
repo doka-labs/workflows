@@ -284,6 +284,11 @@ def candidate(api, environment: dict, root: Path, *, version: str, directory: Pa
     require_release_workflow(policy, environment)
     policies.select_line(policy, source_ref, version, purpose="qualification")
     inventory, symbols = check_packages(policy, root, directory, version, repository, commit, probes)
+    tree = run(["git", "-C", str(root), "rev-parse", f"{commit}^{{tree}}"]).strip()
+    qualification = run_qualification({"repository": repository, "commit": commit, "sourceRef": source_ref,
+                                       "tree": tree, "version": version},
+                                      int(environment["GITHUB_RUN_ID"]), int(environment["GITHUB_RUN_ATTEMPT"]))
+    require_validated_archives(qualification, inventory, required=True)
     states = nuget.availability(directory, inventory)
     require(all(state["state"] == "absent" for state in states),
             "A package version is already on nuget.org; a new candidate needs an unused version.")
@@ -302,7 +307,7 @@ def candidate(api, environment: dict, root: Path, *, version: str, directory: Pa
     (output / PROBES).write_bytes(probes.read_bytes())
     manifest = {"schemaVersion": 1, "repository": repository, "version": version, "tag": f"v{version}",
                 "sourceRef": source_ref, "commit": commit,
-                "tree": run(["git", "-C", str(root), "rev-parse", f"{commit}^{{tree}}"]).strip(),
+                "tree": tree,
                 "packages": inventory, "symbols": symbols, "sboms": sboms,
                 "notesSha256": packages.sha256(output / NOTES), "probesSha256": packages.sha256(output / PROBES)}
     (output / CANDIDATE).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="ascii")
@@ -473,23 +478,50 @@ def verify_candidate(repository: str, directory: Path, *, verify=attestation.ver
         require(any(item["predicate"] == read_json(directory / name) for item in attested),
                 f"No SBOM attestation of {sbom['package']} equals {name}.")
 
+    manifest["qualification"] = run_qualification(manifest, origin["runId"], origin["attempt"], verify=verify)
+    require_validated_archives(manifest["qualification"], manifest["packages"], required=False)
+    return manifest
+
+
+def run_qualification(manifest: dict, run_id: int, attempt: int, *, verify=attestation.verify) -> dict:
+    """Return the release qualification that the candidate's own run attested for its commit and version."""
+    source = {"source_digest": manifest["commit"], "source_ref": manifest["sourceRef"]}
     # WHY: A second dispatch can qualify the same commit and version without permitting publication. Use the
     # signed run identity of the candidate, allowing earlier attempts because re-runs reuse successful jobs.
     # https://docs.github.com/en/actions/concepts/security/artifact-attestations
     # https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs
     with tempfile.TemporaryDirectory(prefix="candidate-subject-") as subject_directory:
         subject = attestation.tree_subject(Path(subject_directory), manifest["tree"])
-        qualified = [item for item in verify(subject, repository, attestation.RELEASE_QUALIFICATION, **source)
-                     if item["runId"] == origin["runId"] and item["attempt"] <= origin["attempt"]
+        qualified = [item for item in verify(subject, manifest["repository"], attestation.RELEASE_QUALIFICATION,
+                                             **source)
+                     if item["runId"] == run_id and item["attempt"] <= attempt
                      and item["predicate"].get("commit") == manifest["commit"]
                      and item["predicate"].get("version") == manifest["version"]]
 
-    require(bool(qualified), f"No release qualification from candidate run {origin['runId']} for "
+    require(bool(qualified), f"No release qualification from candidate run {run_id} for "
                              f"{manifest['commit']} and {manifest['version']}.")
-    manifest["qualification"] = attestation.latest(qualified)["predicate"]
-    require(manifest["qualification"]["snapshot"].get("qualificationOnly") is False,
+    qualification = attestation.latest(qualified)["predicate"]
+    require(qualification["snapshot"].get("qualificationOnly") is False,
             "A qualification-only candidate is never published.")
-    return manifest
+    return qualification
+
+
+def require_validated_archives(qualification: dict, inventory: list[dict], *, required: bool) -> None:
+    """Require the qualification to have validated exactly the candidate's archives when it records them."""
+    # WHY: Qualifications from workflows 0.6.0 on record the archives they validated with the SDK's validator; a
+    # new candidate needs that record. Candidates qualified before only recorded the projects, and stay
+    # publishable as they were. https://learn.microsoft.com/dotnet/fundamentals/apicompat/global-tool
+    validated = qualification.get("packageValidation")
+    recorded = isinstance(validated, list) and any(isinstance(item, dict) and "sha256" in item for item in validated)
+    if not recorded:
+        require(not required, "The release qualification does not record the validated package archives.")
+        return
+
+    expected = {(item["id"], item["nupkg"], item["nupkgSha256"]) for item in inventory}
+    actual = {(item.get("package"), item.get("nupkg"), item.get("sha256")) for item in validated
+              if isinstance(item, dict)}
+    require(len(validated) == len(expected) and actual == expected,
+            "The validated package archives differ from the candidate's packages.")
 
 
 def verify_signed_tag(api, root: Path, manifest: dict) -> str:

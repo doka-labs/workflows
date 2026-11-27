@@ -43,8 +43,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # WHY: self-release refreshes origin/main after checkout, which removes its credentials. GitHub "may
+      # temporarily require authentication for some clones and fetches of public repositories over HTTPS" (HTTP 403
+      # in NestedSet run 44952104737); the helper that gh configures reads this step's GH_TOKEN when Git invokes it.
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      # https://cli.github.com/manual/gh_auth_setup-git
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: python3 -E -s -m tools.release_publication self-release --root "$GITHUB_WORKSPACE" --tag "$TAG"
+        run: |
+          gh auth setup-git --hostname github.com
+          python3 -E -s -m tools.release_publication self-release --root "$GITHUB_WORKSPACE" --tag "$TAG"

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tools.api_reference import __main__ as cli
 from tools.api_reference import site
 
 REPOSITORY = "doka-labs/Doka.Example"
@@ -110,14 +111,87 @@ class SiteTests(unittest.TestCase):
         shutil.rmtree(old)
         project = self.root / "src" / "Extensions" / "Extensions.csproj"
         project.parent.mkdir(parents=True)
-        project.write_text("<Project><PropertyGroup><PackageId>Doka.Example.Extensions</PackageId>"
-                           "</PropertyGroup></Project>\n", encoding="utf-8")
+        project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><PackageId>Doka.Example.Extensions'
+                           "</PackageId></PropertyGroup></Project>\n", encoding="utf-8")
 
         # Act
         result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
 
         # Assert
         self.assertEqual("src/Extensions/Extensions.csproj", result["projects"][1])
+
+    def test_package_id_inherited_from_directory_build_props_selects_the_project(self):
+        # Arrange
+        old = self.root / "src" / "Doka.Example.Extensions"
+        shutil.rmtree(old)
+        project = self.root / "src" / "Extensions" / "Extensions.csproj"
+        project.parent.mkdir(parents=True)
+        project.write_text('<Project Sdk="Microsoft.NET.Sdk" />\n', encoding="utf-8")
+        (project.parent / "Directory.Build.props").write_text(
+            "<Project><PropertyGroup><PackageId>Doka.Example.Extensions</PackageId></PropertyGroup></Project>\n",
+            encoding="utf-8")
+
+        # Act
+        result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
+
+        # Assert
+        self.assertEqual("src/Extensions/Extensions.csproj", result["projects"][1])
+
+    def test_project_that_does_not_pack_is_not_selected(self):
+        # Arrange
+        project = self.root / "src" / "Doka.Example.Extensions" / "Doka.Example.Extensions.csproj"
+        project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><IsPackable>false</IsPackable>'
+                           "</PropertyGroup></Project>\n", encoding="utf-8")
+
+        # Act
+        with self.assertRaises(site.SiteError) as raised:
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
+
+        # Assert
+        self.assertIn("No project under src/ packs Doka.Example.Extensions", str(raised.exception))
+
+    def test_package_id_of_the_pack_configuration_selects_the_project(self):
+        # Arrange
+        project = self.root / "src" / "Doka.Example.Extensions" / "Doka.Example.Extensions.csproj"
+        project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup Condition="\'$(Configuration)\' == '
+                           "'Shipping'\"><PackageId>Doka.Example.Extensions</PackageId></PropertyGroup>"
+                           "<PropertyGroup Condition=\"'$(Configuration)' != 'Shipping'\"><PackageId>Other"
+                           "</PackageId></PropertyGroup></Project>\n", encoding="utf-8")
+
+        # Act
+        result = site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0", configuration="Shipping")
+
+        # Assert
+        config = json.loads((self.root / ".docfx" / "docfx.json").read_text(encoding="utf-8"))
+        self.assertEqual("src/Doka.Example.Extensions/Doka.Example.Extensions.csproj", result["projects"][1])
+        self.assertEqual({"Configuration": "Shipping", "Version": "1.2.0", "PackageVersion": "1.2.0"},
+                         config["metadata"][0]["properties"])
+
+    def test_package_id_of_another_configuration_is_not_used(self):
+        # Arrange
+        project = self.root / "src" / "Doka.Example.Extensions" / "Doka.Example.Extensions.csproj"
+        project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup Condition="\'$(Configuration)\' == '
+                           "'Shipping'\"><PackageId>Doka.Example.Extensions</PackageId></PropertyGroup>"
+                           "<PropertyGroup Condition=\"'$(Configuration)' != 'Shipping'\"><PackageId>Other"
+                           "</PackageId></PropertyGroup></Project>\n", encoding="utf-8")
+
+        # Act
+        with self.assertRaises(site.SiteError) as raised:
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0")
+
+        # Assert
+        self.assertIn("No project under src/ packs Doka.Example.Extensions", str(raised.exception))
+
+    def test_configuration_that_is_not_a_name_fails(self):
+        # Arrange
+        configuration = "Release;PackageId=Doka.Example.Extensions"
+
+        # Act
+        with self.assertRaises(site.SiteError) as raised:
+            site.write(self.root, "Doka.Example", REPOSITORY, "v1.2.0", configuration=configuration)
+
+        # Assert
+        self.assertIn("is not a configuration name", str(raised.exception))
 
     def test_missing_project_of_a_package_fails(self):
         # Arrange
@@ -335,7 +409,7 @@ class SiteTests(unittest.TestCase):
 class DeployTests(unittest.TestCase):
     def test_stable_release_replaces_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False}]
+        releases = [published("v1.1.0", prerelease=False), published("v1.0.0", prerelease=False)]
 
         # Act
         decision = site.should_deploy("1.1.0", releases)
@@ -345,7 +419,7 @@ class DeployTests(unittest.TestCase):
 
     def test_prerelease_before_any_stable_release_replaces_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0-rc.1", "draft": False, "prerelease": True},
+        releases = [published("v1.0.0-rc.2", prerelease=True), published("v1.0.0-rc.1", prerelease=True),
                     {"tag_name": "v1.0.0", "draft": True, "prerelease": False}]
 
         # Act
@@ -356,13 +430,146 @@ class DeployTests(unittest.TestCase):
 
     def test_prerelease_after_a_stable_release_keeps_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False}]
+        releases = [published("v2.0.0-rc.1", prerelease=True), published("v1.0.0", prerelease=False)]
 
         # Act
         decision = site.should_deploy("2.0.0-rc.1", releases)
 
         # Assert
         self.assertFalse(decision)
+
+    def test_release_missing_from_the_list_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.0.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_draft_release_keeps_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v1.0.0-rc.1", "draft": True, "prerelease": False, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.0.0-rc.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_mutable_published_release_keeps_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.0.0", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_maintenance_release_of_an_older_line_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.4.1", prerelease=False), published("v2.0.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.4.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_lower_prerelease_before_any_stable_release_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.0.0-rc.1", prerelease=True), published("v1.0.0-rc.2", prerelease=True)]
+
+        # Act
+        decision = site.should_deploy("1.0.0-rc.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_stable_release_after_a_mutable_older_stable_release_replaces_the_site(self):
+        # Arrange
+        releases = [published("v1.1.0", prerelease=False),
+                    {"tag_name": "v1.0.0", "draft": False, "prerelease": False, "immutable": False},
+                    {"tag_name": "nightly", "draft": False, "prerelease": True, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertTrue(decision)
+
+    def test_newer_draft_does_not_keep_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v2.0.0", "draft": True, "prerelease": False, "immutable": False},
+                    published("v1.1.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertTrue(decision)
+    def test_old_build_loses_eligibility_when_a_newer_release_publishes(self):
+        # Arrange
+        older = published("v1.0.0", prerelease=False)
+        newer = published("v2.0.0", prerelease=False)
+
+        # Act
+        earlier = site.should_deploy("1.0.0", [older])
+        latest = site.should_deploy("2.0.0", [older, newer])
+        recheck = site.should_deploy("1.0.0", [older, newer])
+
+        # Assert
+        self.assertEqual((True, True, False), (earlier, latest, recheck))
+
+
+class DeployWorkflowTests(unittest.TestCase):
+    def test_reusable_workflow_checks_the_tag_and_rechecks_under_the_lock(self):
+        # Arrange
+        workflow = EXAMPLE.parents[1] / ".github" / "workflows" / "api-reference.yml"
+
+        # Act
+        build, deploy = workflow.read_text(encoding="utf-8").split("\n  deploy:\n", 1)
+        job, steps = deploy.split("\n    steps:\n", 1)
+        decide, use_artifact = steps.split("      - name: Deploy the site\n", 1)
+
+        # Assert
+        self.assertIn("ref: refs/tags/${{ inputs.tag }}", build)
+        restore = build.split("      - name: Restore the shipped projects\n", 1)[1].split("      - name:", 1)[0]
+        for argument in ('"-p:Configuration=$PACK_CONFIGURATION"', '"-p:Version=${TAG#v}"',
+                         '"-p:PackageVersion=${TAG#v}"'):
+            self.assertIn(argument, restore)
+        self.assertIn("group: ${{ github.repository }}-pages", job)
+        self.assertIn("queue: max", job)
+        self.assertIn("id: decide", decide)
+        self.assertIn("tools.api_reference should-deploy", decide)
+        self.assertIn("if: steps.decide.outputs.deploy == 'true'", use_artifact)
+
+
+class ReleaseListingTests(unittest.TestCase):
+    def test_every_page_is_read_until_a_short_page(self):
+        # Arrange
+        pages = {1: [published(f"v1.0.{index}", prerelease=False) for index in range(100)],
+                 2: [published("v2.0.0", prerelease=False)]}
+        routes = []
+
+        class Api:
+            def request(self, route):
+                routes.append(route)
+                return pages[int(route.rsplit("=", 1)[1])]
+
+        # Act
+        releases = cli._releases(Api(), "doka-labs/Doka.Example")
+
+        # Assert
+        self.assertEqual(101, len(releases))
+        self.assertEqual(["repos/doka-labs/Doka.Example/releases?per_page=100&page=1",
+                          "repos/doka-labs/Doka.Example/releases?per_page=100&page=2"], routes)
+
+def published(tag: str, *, prerelease: bool) -> dict:
+    """Return a release entry as the list endpoint reports a published immutable release."""
+    return {"tag_name": tag, "draft": False, "prerelease": prerelease, "immutable": True}
 
 
 if __name__ == "__main__":

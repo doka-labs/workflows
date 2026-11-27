@@ -109,6 +109,7 @@ from the runner image for every tracked `*.sh`. actionlint reads the caller's
 own `.github/actionlint.yaml`; a caller that uses `ubuntu-26.04`, the
 `job.workflow_*` context, `concurrency.queue` or `uses: $/...` needs the same
 entries as this repository's `.github/actionlint.yaml`.
+Use a Linux x64 runner for the pinned actionlint binary and zizmor wheel.
 
 ```yaml
 jobs:
@@ -319,6 +320,10 @@ tool only:
   for example `Probe.Lib.Calc/<LaterAsync>d__2`, and need their own entry.
 - A change of the coverage tool can change the measured branches. Check the
   thresholds against a report of the new tool in the same pull request.
+- Coverage resolves file names against their report source roots and maps
+  files below the checkout to repository-relative paths. For reports from
+  other workspaces, set `source-checkout-roots` to the producer checkout
+  paths, one per line. Unknown absolute paths retain their full identity.
 
 The reports under `tools/coverage/tests/data` show each tool's output for the
 same probe library, `Probe.Lib`, measured with the versions listed there.
@@ -341,13 +346,15 @@ of `release.packages`, Portable PDBs against their assemblies, the exact pin
 between packages that share internals, an isolated consumer per package that
 must restore the exact bytes, and a validated SBOM per package. The caller's build job uploads every `.nupkg` and `.snupkg` as
 one artifact and passes the packed version.
+Use a Linux x64 runner for the pinned SBOM tool. The symbol check runs with
+the SDK selected by the product's `global.json`.
 
 ### `pr-assign.yml`
 
 Assigns the author of a new or reopened pull request, so lists show who
 drives it. Bots such as Dependabot are left out, and so are pull requests from
-forks, whose token is read-only. An author who cannot be assigned in the
-repository gets a notice, not a red run.
+forks, whose token is read-only. An author GitHub reports as ineligible gets
+a notice. API and transport failures fail the job.
 
 ```yaml
 name: Pull Request
@@ -580,7 +587,23 @@ between them:
 2. The repository's jobs build, test and pack. They upload the TRX results and
    one artifact with every `.nupkg` and its `.snupkg`; the candidate generates
    the SBOMs itself.
-3. `release-qualification.yml` (see above).
+3. `release-qualification.yml`: the line and version fit the release policy,
+   the commit's tree carries a pull request qualification, the candidate's
+   own gate jobs succeeded and the TRX results of every test project are
+   complete. Every release package must come from a project that sets
+   `EnablePackageValidation` in the pack configuration (`pack-configuration`,
+   default `Release`). The job builds those projects, installs
+   `Microsoft.DotNet.ApiCompat.Tool` of the checkout's SDK version from its
+   signature-verified nuget.org archive and validates the exact archives of
+   the `packages-artifact` (default `packages`) with the settings the SDK's
+   pack would use: suppression files, `NoWarn`, strict modes, rules, the
+   references of each target framework unless
+   `RunPackageValidationWithoutReferences` is set, and the baseline of
+   `PackageValidationBaselineVersion`, downloaded and verified from
+   nuget.org. A `PackageValidationBaselinePath` fails the qualification,
+   because a local file cannot be proven. The qualification records each validated archive with its
+   SHA-256; a new candidate must match them, and candidates qualified before
+   0.6.0 stay publishable.
 4. `release-candidate.yml`: checks package identity and source binding,
    restores each package in an isolated consumer from the candidate bytes and
    requires the restored archives to be byte-identical, generates one SPDX 2.2
@@ -635,6 +658,10 @@ policy on nuget.org with the repository owner, the repository, the workflow
 file `release-candidate.yml` (the file name of `release.workflowPath`) and the
 environment `nuget`, and store the nuget.org profile name as the environment
 secret `NUGET_USER`.
+
+Run the candidate workflow on GitHub-hosted Linux x64 for the pinned SBOM
+tool and verifiable attestations. Release qualification and PR attestation
+require GitHub-hosted Linux, and publication requires a GitHub-hosted runner.
 
 The job token cannot read whether immutable releases are enabled: the setting
 needs the Administration permission, which a `GITHUB_TOKEN` never has. Enforce
@@ -737,8 +764,11 @@ jobs:
           tag: ${{ needs.preflight.outputs.tag }}
           nuget-user: ${{ secrets.NUGET_USER }}
 
+  # WHY: A resumed run skips candidate, and a skip passes to every job that needs it unless the job has its own
+  # condition. https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds
   api-reference:
     needs: [preflight, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     permissions:
       contents: read
       pages: write
@@ -753,7 +783,9 @@ jobs:
 Runs after the publication and builds a DocFX 2.81.0 site from the released
 tag: the API reference of every package in `release.packages` of the release
 policy and every Markdown file under `docs/`. The project of a package is the
-project under `src/` whose `PackageId`, or else file name, is the package id.
+packable project under `src/` whose MSBuild-evaluated `PackageId` is the package
+ID. Selection, restore and DocFX use the tag's version and the
+`pack-configuration` that built the packages, `Release` by default.
 The tool writes the site sources into `.docfx/` of the checkout: `docfx.json`,
 `toc.yml`, `README.md` as `index.md`, and a copy of `docs/`; a repository that
 has `.docfx/` fails, and nothing else of the checkout changes. DocFX builds
@@ -796,10 +828,19 @@ below that row first the index, then each record from `index.json` as
 recommended. The tool reads only `schema_version`, `id`,
 `title`, `status` and `path`, and fails on a `schema_version` other than 1.
 
-A stable release always replaces the site on GitHub Pages; a pre-release
-replaces it only while the repository has no stable release, so the site shows
-the API that NuGet users get. The site is built for every release either way.
+The site on GitHub Pages shows the highest published stable version, and
+before the first stable version the highest pre-release: a release replaces
+it only when no published release has a higher version, so a maintenance
+release of an older line keeps it. Nothing is deployed while the tag's release
+is not a published, immutable release, as after a publish job whose NuGet
+readback is still pending; re-running that job re-runs this workflow. The
+site is built for every release either way. The deploy job checks eligibility
+again while holding the shared Pages deployment lock, and the build checks out
+`refs/tags/<tag>`, never a branch of the same name. Use a Linux x64 runner for
+the pinned DocFX archive.
 Set the repository's Pages source to GitHub Actions before the first release.
+The `github-pages` environment deploys only from the branches it allows, so
+it allows every release line whose release can replace the site.
 
 ## Community and support
 

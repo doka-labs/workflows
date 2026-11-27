@@ -251,7 +251,9 @@ def main(argv: list[str] | None = None) -> int:
             # WHY: Every primary package before every symbol package, each list in dependency order (NestedSet).
             # Symbol packages are listed for every package, not only for pending primaries: an attempt that stopped
             # after a primary push would otherwise never push its symbols. NestedSet and SafeMigrations push all
-            # symbol packages with --skip-duplicate on every publication run for the same reason.
+            # symbol packages on every publication run for the same reason; nuget.org replaces an available symbol
+            # package with the same candidate bytes and refuses one with 409 only while that version validates.
+            # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
             args.output.write_text("".join(f"{row['nupkg']}\n" for row in rows), encoding="ascii")
             args.symbols_output.write_text("".join(f"{row['snupkg']}\n" for row in manifest["packages"]),
                                            encoding="ascii")

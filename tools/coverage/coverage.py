@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import ntpath
+import posixpath
 import re
 import sys
 import time
@@ -89,18 +91,42 @@ def load_policy(path: Path) -> dict:
     return policy
 
 
-def source_key(filename: str) -> str:
-    """Normalize a source path so the same file from different runners merges (SafeMigrations)."""
-    normalized = filename.replace("\\", "/")
-    marker = normalized.find("/src/")
-    return normalized[marker + 1:] if marker >= 0 else normalized
+def source_key(filename: str, source_root: str, checkout_roots: tuple[str, ...]) -> str:
+    """Join a report path and remove only an explicitly identified checkout prefix."""
+    filename = filename.replace("\\", "/")
+    # WHY: Coverlet writes a file path relative to its common source directory when one exists; SourceLink can
+    # instead supply a URL. Absolute filenames already identify their location and do not inherit <source>.
+    # https://github.com/coverlet-coverage/coverlet/blob/master/src/coverlet.core/Reporters/CoberturaReporter.cs
+    if "://" in filename:
+        return filename
+
+    if not posixpath.isabs(filename) and not ntpath.isabs(filename):
+        filename = posixpath.join(source_root.replace("\\", "/"), filename)
+
+    normalized = posixpath.normpath(filename)
+    for root in checkout_roots:
+        if normalized.startswith(root):
+            return normalized[len(root):]
+
+    return normalized
 
 
-def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tuple[str, str, int], Line]]:
+def read_reports(directory: Path, policy: dict, now: float, *, checkout_roots: tuple[str, ...] = ()
+                 ) -> dict[str, dict[tuple[str, str, int], Line]]:
     """Merge every report line by assembly, source, class and line number."""
     reports = sorted(path for path in directory.rglob("*.xml") if REPORT_NAME.fullmatch(path.name))
     if not reports:
         raise CoverageError(f"No Cobertura reports below {directory}.")
+
+    prefixes = set()
+    for value in checkout_roots:
+        root = posixpath.normpath(value.replace("\\", "/"))
+        if not posixpath.isabs(root) and not ntpath.isabs(root):
+            raise CoverageError(f"Checkout root '{value}' must be an absolute path.")
+
+        prefixes.add(root.rstrip("/") + "/")
+
+    ordered_prefixes = tuple(sorted(prefixes, key=len, reverse=True))
 
     merged: dict[str, dict[tuple[str, str, int], Line]] = {}
     for report in reports:
@@ -138,7 +164,7 @@ def read_reports(directory: Path, policy: dict, now: float) -> dict[str, dict[tu
         for package in packages:
             lines = merged.setdefault(package.get("name", ""), {})
             for element in package.findall("./classes/class"):
-                source = source_key("".join(roots) + element.get("filename", ""))
+                source = source_key(element.get("filename", ""), roots[0] if roots else "", ordered_prefixes)
                 # WHY: Only the class's direct lines count; method details can repeat an uneven subset (MySql).
                 for line in element.findall("./lines/line"):
                     key = (source, element.get("name", ""), int(line.get("number", "0")))
@@ -182,9 +208,10 @@ def measure(label: str, lines: list[Line], line_floor: float, branch_floor: floa
             f"({branch_percent:.2f}%)"), errors
 
 
-def verify(directory: Path, policy: dict, shipped: list[str], *, now: float | None = None) -> list[str]:
+def verify(directory: Path, policy: dict, shipped: list[str], *, now: float | None = None,
+           checkout_roots: tuple[str, ...] = ()) -> list[str]:
     """Check all thresholds; every shipped assembly must have a threshold and executed lines (NestedSet)."""
-    merged = read_reports(directory, policy, time.time() if now is None else now)
+    merged = read_reports(directory, policy, time.time() if now is None else now, checkout_roots=checkout_roots)
     names = {entry["name"] for entry in policy["assemblies"]}
     unmeasured = sorted(set(shipped) - names)
     if unmeasured:
@@ -225,13 +252,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy", type=Path, required=True)
     parser.add_argument("--release-policy", type=Path,
                         help="Release policy whose release.packages name the shipped assemblies.")
+    parser.add_argument("--checkout-root", action="append", default=[],
+                        help="Absolute checkout path used to produce reports; repeat for other runners.")
     args = parser.parse_args(argv)
     try:
         # WHY: The shipped assemblies are the release packages, so there is no second list to keep in sync.
         shipped = []
         if args.release_policy is not None and args.release_policy.is_file():
             shipped = json.loads(args.release_policy.read_text(encoding="utf-8"))["release"]["packages"]
-        for line in verify(args.reports, load_policy(args.policy), shipped):
+        for line in verify(args.reports, load_policy(args.policy), shipped, checkout_roots=tuple(args.checkout_root)):
             print(line)
     except CoverageError as error:
         print(f"::error::{error}", file=sys.stderr)

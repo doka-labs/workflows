@@ -9,7 +9,7 @@ on:
   workflow_call:
     inputs:
       runs-on:
-        description: Runner label for the lint job.
+        description: Linux x64 runner label with Bash, Python and shellcheck installed.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -28,6 +28,17 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # WHY: Both the actionlint archive and the pinned Linux zizmor wheel target x64, while GitHub offers Ubuntu
+      # runners on both x64 and ARM64. Report the runner contract before trying to execute an incompatible tool.
+      # https://docs.github.com/en/actions/reference/runners/github-hosted-runners
+      # https://github.com/rhysd/actionlint/releases/tag/v1.7.12
+      - name: Require a Linux x64 runner
+        if: runner.os != 'Linux' || runner.arch != 'X64'
+        shell: bash
+        run: |
+          echo '::error::Workflow Lint requires a Linux x64 runner.'
+          exit 1
+
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

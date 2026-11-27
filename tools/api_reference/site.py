@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 
 from tools.api_reference import links
@@ -29,9 +30,10 @@ TABLE_RULE = re.compile(r"^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$")
 # WHY: The site is built from copies in one directory of its own, so the checkout keeps its relative links for
 # madr-check and as-built, and no generated file can collide with a file of the repository.
 STAGE = ".docfx"
-PACKAGE_ID = re.compile(r"<PackageId>\s*([^<\s]+)\s*</PackageId>")
 # WHY: Both values become part of every GitHub link of the site; anything but owner/name and a release tag would
 # build links to somewhere else.
+# WHY: An MSBuild configuration name as dotnet pack --configuration takes it; anything else could inject properties.
+CONFIGURATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 DECISIONS = PurePosixPath("docs/decisions")
@@ -156,13 +158,37 @@ def attach_decisions(root: Path, sections: list[dict]) -> None:
     rows[0]["items"] = decisions(root)
 
 
-def projects(root: Path, packages: list[str]) -> list[str]:
+def pack_settings(tag: str, configuration: str) -> dict[str, str]:
+    """Return the MSBuild properties of the pack that built the tag's packages."""
+    # WHY: PackageId, IsPackable and the public API can depend on the configuration and version. Without a
+    # configuration MSBuild evaluates Debug, while dotnet pack uses Release for current SDKs; the release
+    # qualification evaluates the same properties. "Starting in the .NET 8 SDK, PackRelease defaults to true."
+    # https://learn.microsoft.com/dotnet/core/project-sdk/msbuild-props#packrelease
+    require(TAG.match(tag) is not None, f"'{tag}' is not v<version>.")
+    require(CONFIGURATION.fullmatch(configuration) is not None, f"'{configuration}' is not a configuration name.")
+    return {"Configuration": configuration, "Version": tag[1:], "PackageVersion": tag[1:]}
+
+
+def projects(root: Path, packages: list[str], settings: dict[str, str]) -> list[str]:
     """Return the project file of each shipped package, relative to the root, in the order of the policy."""
+    # WHY: PackageId can be inherited from Directory.Build.props, and IsPackable decides whether a project packs.
+    # MSBuild evaluates both from the checkout, whose global.json selects the product's SDK.
+    # https://learn.microsoft.com/visualstudio/msbuild/customize-by-directory
+    # https://learn.microsoft.com/dotnet/core/tools/global-json
+    root = root.resolve()
     found: dict[str, str] = {}
     for project in sorted((root / "src").glob("*/*.csproj")):
-        declared = PACKAGE_ID.search(project.read_text(encoding="utf-8"))
-        package = declared[1] if declared else project.stem
-        if package in packages:
+        try:
+            command = ["dotnet", "msbuild", str(project), "-nologo", "-getProperty:PackageId,IsPackable",
+                       *(f"-property:{name}={value}" for name, value in settings.items())]
+            completed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=300, check=True)
+            properties = json.loads(completed.stdout)["Properties"]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+            raise SiteError(f"MSBuild cannot evaluate the package identity of "
+                            f"{project.relative_to(root).as_posix()}.") from error
+
+        package = properties.get("PackageId")
+        if package in packages and str(properties.get("IsPackable", "")).lower() == "true":
             require(package not in found, f"Two projects pack {package}.")
             found[package] = project.relative_to(root).as_posix()
 
@@ -215,13 +241,13 @@ def stage_documents(root: Path, stage: Path, repository: str, tag: str) -> None:
         copy.write_text(text, encoding="utf-8")
 
 
-def write(root: Path, title: str, repository: str, tag: str) -> dict:
+def write(root: Path, title: str, repository: str, tag: str, *, configuration: str = "Release") -> dict:
     """Write the site into .docfx/ of the checkout and return the projects to restore."""
     require(REPOSITORY.match(repository) is not None, f"'{repository}' is not owner/name.")
-    require(TAG.match(tag) is not None, f"'{tag}' is not v<version>.")
+    settings = pack_settings(tag, configuration)
     policy = policies.load_policy(root)
     packages = list(policy["release"]["packages"])
-    files = projects(root, packages)
+    files = projects(root, packages, settings)
     sections = navigation(root)
     attach_decisions(root, sections)
     require((root / "README.md").is_file(), "README.md is missing.")
@@ -232,7 +258,7 @@ def write(root: Path, title: str, repository: str, tag: str) -> dict:
     # WHY: DocFX resolves every relative path of docfx.json from its own directory; the projects lie in the checkout
     # one level above the stage. https://dotnet.github.io/docfx/reference/docfx-json-reference.html
     config = {
-        "metadata": [{"src": [{"src": "..", "files": files}], "dest": "api"}],
+        "metadata": [{"src": [{"src": "..", "files": files}], "dest": "api", "properties": settings}],
         "build": {
             "content": [{"files": ["api/**.yml", "api/index.md", "toc.yml", "index.md", "docs/**/*.md"]}],
             "resource": [{"files": ["docs/**/*.png", "docs/**/*.svg"]}],
@@ -249,10 +275,36 @@ def write(root: Path, title: str, repository: str, tag: str) -> dict:
 
 
 def should_deploy(version: str, releases: list[dict]) -> bool:
-    """Return whether this release replaces the site: stable versions always, pre-releases only before any stable."""
-    # WHY: The site shows the API that NuGet users install by default, which is the newest stable version; a
-    # pre-release shows only until a first stable version exists.
-    if not policies.parse_version(version).is_prerelease:
-        return True
+    """Return whether this published release replaces the site: the highest stable, or before any stable the highest."""
+    # WHY: The publish job ends without failing while nuget.org has not served the packages yet, and the release
+    # then stays a draft; re-running that job also re-runs this workflow, which depends on it. The release list of a
+    # token without push access holds no drafts. https://docs.github.com/en/rest/releases/releases#list-releases
+    # https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs
+    if not any(item.get("tag_name") == f"v{version}" and item.get("draft") is False and item.get("immutable") is True
+               for item in releases):
+        return False
 
-    return not any(not item.get("draft") and not item.get("prerelease") for item in releases)
+    # WHY: dotnet package add installs a pre-release only with --prerelease, so the site shows the highest stable
+    # version, and a pre-release only until a first stable version exists. A maintenance release of an older line
+    # keeps the API of a newer one. https://learn.microsoft.com/dotnet/core/tools/dotnet-add-package
+    published = [found for found in (released_version(item) for item in releases if item.get("draft") is False)
+                 if found is not None]
+    stable = [found for found in published if not policies.parse_version(found).is_prerelease]
+    if stable and policies.parse_version(version).is_prerelease:
+        return False
+
+    return all(policies.compare_versions(version, other) >= 0 for other in stable or published)
+
+
+def released_version(release: dict) -> str | None:
+    """Return the version of a release tagged v<version>, or None for any other tag."""
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        return None
+
+    try:
+        policies.parse_version(tag[1:])
+    except policies.PolicyError:
+        return None
+
+    return tag[1:]

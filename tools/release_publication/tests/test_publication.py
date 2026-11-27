@@ -565,6 +565,55 @@ class VerifyCandidateTests(unittest.TestCase):
         # Assert
         self.assertIs(manifest["qualification"]["snapshot"]["qualificationOnly"], False)
 
+    def validated(self, digest=None):
+        package = self.manifest["packages"][0]
+        return [{"runId": 1, "attempt": 1, "subjects": {}, "predicate": {
+            "commit": COMMIT, "version": "1.2.3", "snapshot": {"qualificationOnly": False},
+            "packageValidation": [{"package": package["id"], "project": "src/Core/Core.csproj",
+                                   "nupkg": package["nupkg"], "sha256": digest or package["nupkgSha256"]}]}}]
+
+    def test_candidate_whose_qualification_validated_its_archives_passes(self):
+        # Arrange
+        fake = self.fake(qualification=self.validated())
+
+        # Act
+        manifest = publication.verify_candidate(REPOSITORY, self.root, verify=fake)
+
+        # Assert
+        self.assertEqual(1, len(manifest["qualification"]["packageValidation"]))
+
+    def test_candidate_whose_qualification_validated_other_archives_fails(self):
+        # Arrange
+        fake = self.fake(qualification=self.validated("0" * 64))
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.verify_candidate(REPOSITORY, self.root, verify=fake)
+
+        # Assert
+        self.assertIn("validated package archives differ", str(raised.exception))
+
+    def test_new_candidate_needs_validated_archives(self):
+        # Arrange
+        qualification = {"packageValidation": [{"package": "Doka.Core", "project": "src/Core/Core.csproj"}]}
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.require_validated_archives(qualification, self.manifest["packages"], required=True)
+
+        # Assert
+        self.assertIn("does not record the validated package archives", str(raised.exception))
+
+    def test_earlier_candidate_without_validated_archives_stays_publishable(self):
+        # Arrange
+        qualification = {"packageValidation": [{"package": "Doka.Core", "project": "src/Core/Core.csproj"}]}
+
+        # Act
+        result = publication.require_validated_archives(qualification, self.manifest["packages"], required=False)
+
+        # Assert
+        self.assertIsNone(result)
+
     def test_qualification_only_candidate_is_rejected_during_verification(self):
         # Arrange
         qualification = [{"runId": 1, "attempt": 1, "predicate": {"commit": COMMIT, "version": "1.2.3",

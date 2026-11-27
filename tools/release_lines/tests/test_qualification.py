@@ -294,17 +294,64 @@ class RestoreQualificationTests(unittest.TestCase):
 
 
 class PackageValidationTests(unittest.TestCase):
-    def check(self, evaluated, ids):
-        projects = [Path(f"/repo/src/{name}/{name}.csproj") for name in evaluated]
-        original = (qualification.source_projects, qualification.evaluate)
-        qualification.source_projects = lambda root: projects
-        qualification.evaluate = lambda root, project, names: evaluated[project.stem]
-        try:
-            return qualification.require_package_validation(Path("/repo"), ids)
-        finally:
-            qualification.source_projects, qualification.evaluate = original
+    """The qualification validates the exact archives; the SDK, MSBuild and the tool are replaced by fakes here."""
 
-    def test_validated_packages_pass(self):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.packages = self.root / "packages"
+        self.packages.mkdir()
+        self.calls = []
+        self.tool_code = 0
+
+    def run_fake(self, command, **options):
+        from types import SimpleNamespace
+
+        self.calls.append(command)
+        if command[:2] == ["dotnet", "--version"]:
+            return SimpleNamespace(returncode=0, stdout="10.0.404\n")
+
+        if command[:3] == ["dotnet", "tool", "install"]:
+            tool = Path(command[command.index("--tool-path") + 1]) / "apicompat"
+            tool.parent.mkdir(parents=True, exist_ok=True)
+            tool.touch()
+            return SimpleNamespace(returncode=0, stdout="")
+
+        if command[:2] == ["dotnet", "msbuild"]:
+            import json
+
+            return SimpleNamespace(returncode=0, stdout=json.dumps({
+                "Properties": {"TargetFramework": "net10.0", "RunPackageValidationWithoutReferences": "true"},
+                "Items": {}}))
+
+        if command[0].endswith("apicompat"):
+            return SimpleNamespace(returncode=self.tool_code, stdout="")
+
+        return SimpleNamespace(returncode=0, stdout="")
+
+    def fetch_fake(self, url, headers, timeout):
+        import json
+
+        if url.endswith("index.json"):
+            return 200, json.dumps({"resources": [{"@type": "PackageBaseAddress/3.0.0",
+                                                   "@id": "https://api.nuget.org/v3-flatcontainer/"}]}).encode()
+
+        return 200, b"tool package"
+
+    def check(self, evaluated, ids, archives=None):
+        (self.root / "global.json").write_text("{}", encoding="ascii")
+        for name in ids if archives is None else archives:
+            (self.packages / f"{name}.1.2.3.nupkg").write_bytes(name.encode())
+        projects = [self.root / "src" / name / f"{name}.csproj" for name in evaluated]
+        with patch.object(qualification, "source_projects", lambda root: projects), \
+                patch.object(qualification, "evaluate", lambda root, project, names, settings: evaluated[project.stem]):
+            return qualification.require_package_validation(
+                self.root, ids, package_dir=self.packages, version="1.2.3", configuration="Release",
+                work=self.root / "work", run=self.run_fake, fetcher=self.fetch_fake,
+                verifier=lambda path, timeout: None)
+
+    def test_validated_archive_is_recorded_with_its_digest(self):
         # Arrange
         evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"},
                      "Tests": {"PackageId": "Tests", "IsPackable": "false", "EnablePackageValidation": ""}}
@@ -313,9 +360,18 @@ class PackageValidationTests(unittest.TestCase):
         result = self.check(evaluated, ["Doka.Core"])
 
         # Assert
-        self.assertEqual([{"package": "Doka.Core", "project": "src/Core/Core.csproj"}], result)
+        import hashlib
 
-    def test_package_without_validation_fails(self):
+        self.assertEqual([{"package": "Doka.Core", "project": "src/Core/Core.csproj", "configuration": "Release",
+                           "nupkg": "Doka.Core.1.2.3.nupkg", "sha256": hashlib.sha256(b"Doka.Core").hexdigest(),
+                           "baselineVersion": None}], result)
+        build = next(call for call in self.calls if call[:2] == ["dotnet", "build"])
+        self.assertIn("-property:Configuration=Release", build)
+        self.assertIn("-property:PackageVersion=1.2.3", build)
+        tool = next(call for call in self.calls if call[0].endswith("apicompat"))
+        self.assertEqual(["package", str(self.packages / "Doka.Core.1.2.3.nupkg")], tool[1:3])
+
+    def test_package_without_validation_in_the_pack_configuration_fails(self):
         # Arrange
         evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "false"}}
 
@@ -324,7 +380,7 @@ class PackageValidationTests(unittest.TestCase):
             self.check(evaluated, ["Doka.Core"])
 
         # Assert
-        self.assertIn("without EnablePackageValidation", str(raised.exception))
+        self.assertIn("without EnablePackageValidation in Release", str(raised.exception))
 
     def test_missing_package_fails(self):
         # Arrange
@@ -336,6 +392,41 @@ class PackageValidationTests(unittest.TestCase):
 
         # Assert
         self.assertIn("Doka.Other", str(raised.exception))
+
+    def test_artifact_with_another_archive_fails(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"}}
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.check(evaluated, ["Doka.Core"], archives=["Doka.Core", "Doka.Extra"])
+
+        # Assert
+        self.assertIn("exactly the release packages", str(raised.exception))
+
+    def test_archive_the_tool_rejects_fails(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"}}
+        self.tool_code = 1
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.check(evaluated, ["Doka.Core"])
+
+        # Assert
+        self.assertIn("Package validation of Doka.Core.1.2.3.nupkg failed", str(raised.exception))
+
+    def test_configuration_that_is_not_a_name_fails(self):
+        # Arrange
+        configuration = "Release;Foo=1"
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            qualification.require_package_validation(self.root, ["Doka.Core"], package_dir=self.packages,
+                                                     version="1.2.3", configuration=configuration, work=self.root)
+
+        # Assert
+        self.assertIn("MSBuild configuration name", str(raised.exception))
 
 
 class GateJobTests(unittest.TestCase):
@@ -513,7 +604,8 @@ class GateBindingTests(unittest.TestCase):
                 mock.patch.object(qualification, "test_projects", return_value={}), \
                 mock.patch.object(qualification, "require_package_validation", return_value=[]):
             return qualification.qualify(None, environment, Path(directory), version="1.2.3", qualification_only=False,
-                                         trx_dir=Path(directory), output=Path(directory), verify=verify)
+                                         trx_dir=Path(directory), output=Path(directory), package_dir=Path(directory),
+                                         verify=verify)
 
     def test_each_gate_counts_in_the_attestation_of_its_workflow(self):
         # Arrange

@@ -65,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     qualify.add_argument("--version", required=True)
     qualify.add_argument("--qualification-only", choices=("true", "false"), required=True)
     qualify.add_argument("--trx", type=Path, required=True)
+    qualify.add_argument("--packages", type=Path, required=True, help="Directory with the packed release archives.")
+    qualify.add_argument("--pack-configuration", default="Release", help="MSBuild configuration of the pack.")
     qualify.add_argument("--output", type=Path, required=True)
     coordinate = commands.add_parser("coordinate", help="Dispatch a workload on active lines besides main.")
     coordinate.add_argument("--workload", required=True)
@@ -121,7 +123,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "qualify":
             summary = qualification.qualify(GitHub(), environment, args.root.resolve(), version=args.version,
                                             qualification_only=args.qualification_only == "true",
-                                            trx_dir=args.trx.resolve(), output=args.output.resolve())
+                                            trx_dir=args.trx.resolve(), output=args.output.resolve(),
+                                            package_dir=args.packages.resolve(),
+                                            pack_configuration=args.pack_configuration)
             _write_output(environment.get("GITHUB_OUTPUT"), "subject", summary["subject"])
             _write_output(environment.get("GITHUB_OUTPUT"), "tree", summary["tree"])
             print(json.dumps(summary, indent=2, sort_keys=True))

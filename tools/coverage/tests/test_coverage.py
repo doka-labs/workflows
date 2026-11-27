@@ -29,12 +29,12 @@ def policy(line=80, branch=50, critical=(), max_age=None):
 
 
 class CoverageTests(unittest.TestCase):
-    def verify(self, reports, value, shipped=("Doka.Core",)):
+    def verify(self, reports, value, shipped=("Doka.Core",), checkout_roots=()):
         with tempfile.TemporaryDirectory() as directory:
             for index, text in enumerate(reports):
                 Path(directory, f"r{index}.cobertura.xml").write_text(text, encoding="utf-8")
 
-            return coverage.verify(Path(directory), value, list(shipped), now=NOW)
+            return coverage.verify(Path(directory), value, list(shipped), now=NOW, checkout_roots=checkout_roots)
 
     def failure(self, reports, value, shipped=("Doka.Core",)):
         with self.assertRaises(coverage.CoverageError) as raised:
@@ -48,18 +48,40 @@ class CoverageTests(unittest.TestCase):
         second = report([(1, 0, 2, 2), (2, 1, 0, 0)], source="/b/src/Core/Thing.cs")
 
         # Act
-        summary = self.verify([first, second], policy(line=100, branch=100))
+        summary = self.verify([first, second], policy(line=100, branch=100), checkout_roots=("/a", "/b"))
 
         # Assert
         self.assertEqual(["Doka.Core: lines 2/2 (100.00%), branches 2/2 (100.00%)"], summary)
 
     def test_file_names_relative_to_different_source_roots_merge_by_line(self):
         # Arrange
-        alone = report([(1, 1, 0, 0), (2, 0, 0, 0)], source="Thing.cs", roots=["/w/src/Core/"])
+        alone = report([(1, 1, 0, 0), (2, 0, 0, 0)], source="Thing.cs", roots=["/w/src/Core"])
         together = report([(1, 0, 0, 0), (2, 1, 0, 0)], source="Core/Thing.cs", roots=["/w/src/"])
 
         # Act
         summary = self.verify([alone, together], policy(line=100, branch=None))
+
+        # Assert
+        self.assertEqual(["Doka.Core: lines 2/2 (100.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_distinct_files_with_the_same_suffix_do_not_merge(self):
+        # Arrange
+        first = report([(1, 1, 0, 0)], source="/w/src/Core/Thing.cs")
+        second = report([(1, 0, 0, 0)], source="/w/tests/fixture/src/Core/Thing.cs")
+
+        # Act
+        summary = self.verify([first, second], policy(line=50, branch=None))
+
+        # Assert
+        self.assertEqual(["Doka.Core: lines 1/2 (50.00%), branches 0/0 (0.00%)"], summary)
+
+    def test_absolute_filename_does_not_inherit_a_source_root(self):
+        # Arrange
+        first = report([(1, 1, 0, 0), (2, 0, 0, 0)], source="C:/checkout/src/Core/Thing.cs", roots=["D:/another/"])
+        second = report([(1, 0, 0, 0), (2, 1, 0, 0)], source=r"C:\checkout\src\Core\Thing.cs")
+
+        # Act
+        summary = self.verify([first, second], policy(line=100, branch=None))
 
         # Assert
         self.assertEqual(["Doka.Core: lines 2/2 (100.00%), branches 0/0 (0.00%)"], summary)

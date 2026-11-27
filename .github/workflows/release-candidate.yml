@@ -24,7 +24,7 @@ on:
         # WHY: The supplier NestedSet names in its SBOMs.
         default: Doka Labs
       runs-on:
-        description: Runner label.
+        description: GitHub-hosted Linux x64 runner label.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -56,6 +56,17 @@ jobs:
       queue: max
 
     steps:
+      # WHY: The pinned SBOM binary targets Linux x64 and release verification rejects self-hosted attestations.
+      # Every job in this workflow uses the same runner label.
+      # https://github.com/microsoft/sbom-tool/releases/tag/v4.1.5
+      # https://cli.github.com/manual/gh_attestation_verify
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context
+      - name: Require a GitHub-hosted Linux x64 runner
+        if: runner.environment != 'github-hosted' || runner.os != 'Linux' || runner.arch != 'X64'
+        run: |
+          echo '::error::Release Candidate requires a GitHub-hosted Linux x64 runner.'
+          exit 1
+
       - name: Check out the release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,9 +124,12 @@ jobs:
             --version "$VERSION" --packages "$RUNNER_TEMP/packages" --tool "$RUNNER_TEMP/sbom-tool/sbom-tool" \
             --supplier "$SUPPLIER" --output "$RUNNER_TEMP/sbom-logs"
 
+      # WHY: The dotnet CLI resolves global.json from its working directory, so run from the product checkout
+      # and pass the shared tool by absolute path. https://learn.microsoft.com/dotnet/core/tools/global-json
       - name: Verify the Portable PDBs and derive symbol probes
+        working-directory: repository
         run: >-
-          dotnet run --project .workflows/tools/NuGetSymbols/NuGetSymbols.csproj --configuration Release --
+          dotnet run --project "$GITHUB_WORKSPACE/.workflows/tools/NuGetSymbols/NuGetSymbols.csproj" --configuration Release --
           --packages "$RUNNER_TEMP/packages" --output "$RUNNER_TEMP/symbol-probes.json"
 
       - name: Check the packages and write the candidate manifest
@@ -245,11 +259,17 @@ jobs:
           path: .workflows
           persist-credentials: false
 
+      # WHY: tag-readiness runs git ls-remote after checkout, which removes its credentials. GitHub "may temporarily
+      # require authentication for some clones and fetches of public repositories over HTTPS" (HTTP 403 in NestedSet
+      # run 44952104737); the helper that gh configures reads this step's GH_TOKEN when Git invokes it.
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      # https://cli.github.com/manual/gh_auth_setup-git
       - name: Check that the candidate commit can be tagged
         working-directory: .workflows
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-        run: >-
-          python3 -E -s -m tools.release_publication tag-readiness --root "$GITHUB_WORKSPACE/repository"
-          --version "$VERSION"
+        run: |
+          gh auth setup-git --hostname github.com
+          python3 -E -s -m tools.release_publication tag-readiness --root "$GITHUB_WORKSPACE/repository" \
+            --version "$VERSION"
