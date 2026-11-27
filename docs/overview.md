@@ -285,7 +285,7 @@ flowchart TB
   check --> publish
   approve --> publish["publish job of the release workflow<br/>calls actions/release-publish, see 13"]
   publish --> done2(["immutable release, packages on nuget.org"])
-  done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages<br/>for stable releases and before the first stable"]
+  done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages once the release<br/>is published and no published release is higher<br/>(stable first, pre-releases before the first stable)"]
 ```
 
 ## 10. Preflight

@@ -12,6 +12,28 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-27
+
+### Fixed
+
+- `api-reference.yml` deploys the site only when the tag's release is
+  published and immutable. A publish job whose NuGet readback is still
+  pending ends without failing while the release stays a draft; the site
+  of such a version was deployed before. Re-running the publish job also
+  re-runs the workflow, which then deploys.
+- A stable release replaces the site only when no published release has a
+  higher version, so a maintenance release of an older line no longer
+  replaces the API of a newer one; before the first stable version the
+  highest pre-release is shown. The release list is read page by page.
+- The caller example gives the `api-reference` job the condition
+  `!cancelled() && needs.publish.result == 'success'`. Without it the job
+  was skipped in Tabular's resumed run 45908860276, because the skipped
+  `candidate` job passed its skip on through `publish`.
+- The reason given for pushing every symbol package on every run states
+  what nuget.org does: it refuses a symbol package with 409 only while one
+  of that version validates, and otherwise replaces the available one with
+  the same bytes.
+
 ## [0.5.1] - 2026-11-26
 
 ### Fixed

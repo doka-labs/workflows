@@ -249,10 +249,36 @@ def write(root: Path, title: str, repository: str, tag: str) -> dict:
 
 
 def should_deploy(version: str, releases: list[dict]) -> bool:
-    """Return whether this release replaces the site: stable versions always, pre-releases only before any stable."""
-    # WHY: The site shows the API that NuGet users install by default, which is the newest stable version; a
-    # pre-release shows only until a first stable version exists.
-    if not policies.parse_version(version).is_prerelease:
-        return True
+    """Return whether this published release replaces the site: the highest stable, or before any stable the highest."""
+    # WHY: The publish job ends without failing while nuget.org has not served the packages yet, and the release
+    # then stays a draft; re-running that job also re-runs this workflow, which depends on it. The release list of a
+    # token without push access holds no drafts. https://docs.github.com/en/rest/releases/releases#list-releases
+    # https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs
+    if not any(item.get("tag_name") == f"v{version}" and item.get("draft") is False and item.get("immutable") is True
+               for item in releases):
+        return False
 
-    return not any(not item.get("draft") and not item.get("prerelease") for item in releases)
+    # WHY: dotnet package add installs a pre-release only with --prerelease, so the site shows the highest stable
+    # version, and a pre-release only until a first stable version exists. A maintenance release of an older line
+    # keeps the API of a newer one. https://learn.microsoft.com/dotnet/core/tools/dotnet-add-package
+    published = [found for found in (released_version(item) for item in releases if item.get("draft") is False)
+                 if found is not None]
+    stable = [found for found in published if not policies.parse_version(found).is_prerelease]
+    if stable and policies.parse_version(version).is_prerelease:
+        return False
+
+    return all(policies.compare_versions(version, other) >= 0 for other in stable or published)
+
+
+def released_version(release: dict) -> str | None:
+    """Return the version of a release tagged v<version>, or None for any other tag."""
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        return None
+
+    try:
+        policies.parse_version(tag[1:])
+    except policies.PolicyError:
+        return None
+
+    return tag[1:]

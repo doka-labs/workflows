@@ -737,8 +737,11 @@ jobs:
           tag: ${{ needs.preflight.outputs.tag }}
           nuget-user: ${{ secrets.NUGET_USER }}
 
+  # WHY: A resumed run skips candidate, and a skip passes to every job that needs it unless the job has its own
+  # condition. https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds
   api-reference:
     needs: [preflight, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     permissions:
       contents: read
       pages: write
@@ -796,10 +799,16 @@ below that row first the index, then each record from `index.json` as
 recommended. The tool reads only `schema_version`, `id`,
 `title`, `status` and `path`, and fails on a `schema_version` other than 1.
 
-A stable release always replaces the site on GitHub Pages; a pre-release
-replaces it only while the repository has no stable release, so the site shows
-the API that NuGet users get. The site is built for every release either way.
+The site on GitHub Pages shows the highest published stable version, and
+before the first stable version the highest pre-release: a release replaces
+it only when no published release has a higher version, so a maintenance
+release of an older line keeps it. Nothing is deployed while the tag's release
+is not a published, immutable release, as after a publish job whose NuGet
+readback is still pending; re-running that job re-runs this workflow. The
+site is built for every release either way.
 Set the repository's Pages source to GitHub Actions before the first release.
+The `github-pages` environment deploys only from the branches it allows, so
+it allows every release line whose release can replace the site.
 
 ## Community and support
 

@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tools.api_reference import __main__ as cli
 from tools.api_reference import site
 
 REPOSITORY = "doka-labs/Doka.Example"
@@ -335,7 +336,7 @@ class SiteTests(unittest.TestCase):
 class DeployTests(unittest.TestCase):
     def test_stable_release_replaces_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False}]
+        releases = [published("v1.1.0", prerelease=False), published("v1.0.0", prerelease=False)]
 
         # Act
         decision = site.should_deploy("1.1.0", releases)
@@ -345,7 +346,7 @@ class DeployTests(unittest.TestCase):
 
     def test_prerelease_before_any_stable_release_replaces_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0-rc.1", "draft": False, "prerelease": True},
+        releases = [published("v1.0.0-rc.2", prerelease=True), published("v1.0.0-rc.1", prerelease=True),
                     {"tag_name": "v1.0.0", "draft": True, "prerelease": False}]
 
         # Act
@@ -356,13 +357,110 @@ class DeployTests(unittest.TestCase):
 
     def test_prerelease_after_a_stable_release_keeps_the_site(self):
         # Arrange
-        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False}]
+        releases = [published("v2.0.0-rc.1", prerelease=True), published("v1.0.0", prerelease=False)]
 
         # Act
         decision = site.should_deploy("2.0.0-rc.1", releases)
 
         # Assert
         self.assertFalse(decision)
+
+    def test_release_missing_from_the_list_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.0.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_draft_release_keeps_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v1.0.0-rc.1", "draft": True, "prerelease": False, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.0.0-rc.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_mutable_published_release_keeps_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v1.0.0", "draft": False, "prerelease": False, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.0.0", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_maintenance_release_of_an_older_line_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.4.1", prerelease=False), published("v2.0.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.4.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_lower_prerelease_before_any_stable_release_keeps_the_site(self):
+        # Arrange
+        releases = [published("v1.0.0-rc.1", prerelease=True), published("v1.0.0-rc.2", prerelease=True)]
+
+        # Act
+        decision = site.should_deploy("1.0.0-rc.1", releases)
+
+        # Assert
+        self.assertFalse(decision)
+
+    def test_stable_release_after_a_mutable_older_stable_release_replaces_the_site(self):
+        # Arrange
+        releases = [published("v1.1.0", prerelease=False),
+                    {"tag_name": "v1.0.0", "draft": False, "prerelease": False, "immutable": False},
+                    {"tag_name": "nightly", "draft": False, "prerelease": True, "immutable": False}]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertTrue(decision)
+
+    def test_newer_draft_does_not_keep_the_site(self):
+        # Arrange
+        releases = [{"tag_name": "v2.0.0", "draft": True, "prerelease": False, "immutable": False},
+                    published("v1.1.0", prerelease=False)]
+
+        # Act
+        decision = site.should_deploy("1.1.0", releases)
+
+        # Assert
+        self.assertTrue(decision)
+
+class ReleaseListingTests(unittest.TestCase):
+    def test_every_page_is_read_until_a_short_page(self):
+        # Arrange
+        pages = {1: [published(f"v1.0.{index}", prerelease=False) for index in range(100)],
+                 2: [published("v2.0.0", prerelease=False)]}
+        routes = []
+
+        class Api:
+            def request(self, route):
+                routes.append(route)
+                return pages[int(route.rsplit("=", 1)[1])]
+
+        # Act
+        releases = cli._releases(Api(), "doka-labs/Doka.Example")
+
+        # Assert
+        self.assertEqual(101, len(releases))
+        self.assertEqual(["repos/doka-labs/Doka.Example/releases?per_page=100&page=1",
+                          "repos/doka-labs/Doka.Example/releases?per_page=100&page=2"], routes)
+
+def published(tag: str, *, prerelease: bool) -> dict:
+    """Return a release entry as the list endpoint reports a published immutable release."""
+    return {"tag_name": tag, "draft": False, "prerelease": prerelease, "immutable": True}
 
 
 if __name__ == "__main__":

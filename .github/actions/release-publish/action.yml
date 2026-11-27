@@ -125,8 +125,11 @@ runs:
     # its bytes were compared with the candidate in the previous step and are read back below. --no-symbols
     # keeps the primary push from also pushing the .snupkg next to it, so every primary precedes every symbol
     # package; the symbol packages follow for every package, because an attempt can stop between the two
-    # pushes (NestedSet and SafeMigrations push all symbol packages with --skip-duplicate on every run).
+    # pushes (NestedSet and SafeMigrations push all symbol packages on every run). nuget.org refuses a symbol
+    # package with 409 only while one of that version is validating, which --skip-duplicate skips; otherwise it
+    # accepts the same candidate bytes again and replaces the available one with them.
     # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-push
+    # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
     - name: Push the pending packages, then every symbol package
       shell: bash
       env:
