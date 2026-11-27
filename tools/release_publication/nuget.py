@@ -158,13 +158,33 @@ def validate_symbol_probes(probes: list[dict]) -> None:
 
 def require_symbol(probe: dict, fetcher=fetch) -> None:
     """Require the symbol server to serve exactly the probe's Portable PDB; raise PendingError while it does not."""
-    # WHY: symbols.nuget.org returns a Portable PDB only with the checksum the assembly carries in the SymbolChecksum
-    # header (403 without it, 200 with it for Doka.NestedSet 10.4.0 and Doka.Tabular 1.0.0-rc.1; MySql's
-    # fetch_remote_symbol sends the same header). The documentation does not describe the header.
+    # WHY: symbols.nuget.org answers 403 without a SymbolChecksum header and 200 with one (Doka.NestedSet 10.4.0,
+    # Doka.Tabular 1.0.0-rc.1; MySql's fetch_remote_symbol sends the same header). It also served the PDB for a wrong
+    # checksum value, so the served bytes are compared by SHA-256. The documentation does not describe the header.
     status, content = fetcher(probe["url"], {"SymbolChecksum": probe["checksum"]}, 30)
     require_response(status, probe["pdb"])
+    require_symbol_bytes(probe, content)
+
+
+def require_symbol_bytes(probe: dict, content: bytes) -> None:
+    """Require the served Portable PDB to be byte-identical to the probe's."""
     if hashlib.sha256(content).hexdigest() != probe["sha256"]:
         raise NuGetError(f"The symbol server serves another {probe['pdb']}.")
+
+
+def symbol_state(probe: dict, fetcher=fetch) -> str:
+    """Return absent or matching for one Portable PDB; other bytes or unclear answers fail."""
+    status, content = fetcher(probe["url"], {"SymbolChecksum": probe["checksum"]}, 30)
+    if status == 404:
+        return "absent"
+
+    if status != 200:
+        # WHY: A timeout or an error cannot prove that a symbol package is missing, and a push would replace an
+        # available one. MySql's fetch_remote_symbol reports only 404 as absent and stops the preflight otherwise.
+        raise NuGetError(f"Cannot establish the state of {probe['pdb']} on the symbol server (HTTP {status}).")
+
+    require_symbol_bytes(probe, content)
+    return "matching"
 
 
 def pending_symbols(inventory: list[dict], probes: list[dict], *, fetcher=fetch) -> list[dict]:
@@ -180,10 +200,10 @@ def pending_symbols(inventory: list[dict], probes: list[dict], *, fetcher=fetch)
         if not owned:
             raise NuGetError(f"{package['nupkg']} has no symbol probe.")
 
-        try:
-            for probe in owned:
-                require_symbol(probe, fetcher)
-        except PendingError:
+        # WHY: Every probe is asked, so other bytes for one PDB fail also when another PDB of the package is absent
+        # (MySql's observe_remote_symbols classifies every entry).
+        states = [symbol_state(probe, fetcher) for probe in owned]
+        if "absent" in states:
             pending.append(package)
 
     return pending

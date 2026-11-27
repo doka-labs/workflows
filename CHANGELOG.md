@@ -20,7 +20,9 @@ entries stay under Unreleased.
   resuming at a published release; nuget.org accepts such a repeated symbol
   package and replaces the available one. It now asks the symbol server for
   each Portable PDB first and pushes only the symbol packages whose PDBs are
-  not served, as MySql does.
+  not served, as MySql does. Only a 404 counts as not served; other bytes for
+  any PDB or an unclear answer such as 429 or 503 stop the run before a key is
+  requested.
 - `NuGet/login` and the push run only when a package or a symbol package is
   missing, so a run with nothing to publish requests no key.
 - Authority, environment and the signed tag are checked again before the key

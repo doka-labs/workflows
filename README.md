@@ -671,7 +671,8 @@ between them:
    pushing, it checks the existing Latest release and verifies the current
    draft assets. It requests a NuGet key and pushes only when nuget.org does
    not hold a package yet or the symbol server does not serve a package's
-   Portable PDBs yet, and checks again before every single push; a run that
+   Portable PDBs yet (a 404; an unclear answer stops the run before the key is
+   requested), and checks again before every single push; a run that
    resumes at a published release writes nothing to nuget.org. It reads every
    package back signed and every Portable PDB from the symbol server,
    restores every package from nuget.org only in an isolated consumer,

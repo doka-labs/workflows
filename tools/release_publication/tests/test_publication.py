@@ -331,6 +331,51 @@ class NuGetTests(unittest.TestCase):
         # Assert
         self.assertIn("serves another", str(raised.exception))
 
+    def test_unclear_symbol_answers_fail_instead_of_pending(self):
+        for status in (0, 403, 408, 429, 503):
+            with self.subTest(status=status):
+                # Arrange
+                probe = self.probe()
+                fetcher = FakeFetcher({probe["url"]: (status, b"")})
+
+                # Act
+                with self.assertRaises(nuget.NuGetError) as raised:
+                    nuget.pending_symbols(self.inventory, [probe], fetcher=fetcher)
+
+                # Assert
+                self.assertNotIsInstance(raised.exception, nuget.PendingError)
+                self.assertIn(f"Cannot establish the state of {probe['pdb']}", str(raised.exception))
+
+    def test_other_bytes_fail_in_either_order_with_an_absent_pdb(self):
+        for absent_first in (True, False):
+            with self.subTest(absent_first=absent_first):
+                # Arrange
+                absent = {**self.probe(), "url": "https://symbols.nuget.org/download/symbols/a.pdb/k/a.pdb",
+                          "pdb": "lib/net10.0/a.pdb"}
+                other = {**self.probe(), "url": "https://symbols.nuget.org/download/symbols/b.pdb/k/b.pdb",
+                         "pdb": "lib/net10.0/b.pdb"}
+                probes = [absent, other] if absent_first else [other, absent]
+                fetcher = FakeFetcher({absent["url"]: (404, b""), other["url"]: (200, b"other")})
+
+                # Act
+                with self.assertRaises(nuget.NuGetError) as raised:
+                    nuget.pending_symbols(self.inventory, probes, fetcher=fetcher)
+
+                # Assert
+                self.assertIn("serves another lib/net10.0/b.pdb", str(raised.exception))
+
+    def test_package_with_one_absent_pdb_is_pending(self):
+        # Arrange
+        served = {**self.probe(), "url": "https://symbols.nuget.org/download/symbols/a.pdb/k/a.pdb"}
+        absent = {**self.probe(), "url": "https://symbols.nuget.org/download/symbols/b.pdb/k/b.pdb"}
+        fetcher = FakeFetcher({served["url"]: (200, b"pdb"), absent["url"]: (404, b"")})
+
+        # Act
+        pending = nuget.pending_symbols(self.inventory, [served, absent], fetcher=fetcher)
+
+        # Assert
+        self.assertEqual([self.inventory[0]["snupkg"]], [package["snupkg"] for package in pending])
+
     def test_package_without_a_symbol_probe_fails(self):
         # Arrange
         fetcher = FakeFetcher({})
