@@ -83,6 +83,23 @@ class WorkflowExecutionContractTests(unittest.TestCase):
         # Assert
         self.assertIn("working-directory: repository", push)
 
+    def test_publication_requests_a_key_and_pushes_only_what_is_missing(self):
+        # Arrange
+        action = ROOT / ".github" / "actions" / "release-publish" / "action.yml"
+        parts = steps(action)
+
+        # Act
+        login = command_step(parts, "NuGet/login@")
+        push = command_step(parts, "dotnet nuget push")
+        pending = command_step(parts, "pending-packages")
+
+        # Assert
+        self.assertIn("id: pending", pending)
+        for step in (login, push):
+            self.assertIn("if: steps.pending.outputs.push == 'true'", step)
+        for loop in push.split("done < ")[:2]:
+            self.assertLess(loop.rindex("recheck"), loop.index("dotnet nuget push"))
+
     def test_unsupported_runners_fail_before_checkout(self):
         # Arrange
         action = ROOT / ".github" / "actions" / "release-publish" / "action.yml"

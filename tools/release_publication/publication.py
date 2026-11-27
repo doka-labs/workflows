@@ -20,7 +20,7 @@ from urllib.parse import quote
 
 from tools.release_lines import attestation, qualification
 from tools.release_lines import policy as policies
-from tools.release_lines.coordinator import observe_authority, protected_head
+from tools.release_lines.coordinator import observe_authority, protected_head, read_source
 from tools.release_lines.github import GitHubError
 from tools.release_publication import nuget, packages
 
@@ -524,7 +524,15 @@ def require_validated_archives(qualification: dict, inventory: list[dict], *, re
             "The validated package archives differ from the candidate's packages.")
 
 
-def verify_signed_tag(api, root: Path, manifest: dict) -> str:
+def current_signers(api, repository: str, authority_commit: str) -> str:
+    """Return the allowed signers of the current head of protected main, where the release policy comes from."""
+    # WHY: A key removed from the list must stop counting at once, also for tags made before. MySql's completion reads
+    # the signers "freshly" from the protected control commit, and SafeMigrations' finalize verifies the original tag
+    # with the allowed-signers file of the current checkout, not of the original source; here every check does so.
+    return read_source(api, repository, ALLOWED_SIGNERS, authority_commit).decode("utf-8")
+
+
+def verify_signed_tag(api, root: Path, manifest: dict, signers: str) -> str:
     """Require an annotated SSH-signed tag on the candidate commit, verified locally and by GitHub (T1-T5, T7)."""
     repository, tag, commit = manifest["repository"], manifest["tag"], manifest["commit"]
     branch = manifest["sourceRef"].removeprefix("refs/heads/")
@@ -535,9 +543,6 @@ def verify_signed_tag(api, root: Path, manifest: dict) -> str:
             f"{tag} must be an annotated tag.")
     require(run(["git", "-C", str(root), "rev-parse", f"refs/tags/{tag}^{{commit}}"]).strip() == commit,
             f"{tag} does not point to the candidate commit.")
-    # WHY: The signer list comes from the candidate commit, the reviewed source that was qualified (NestedSet reads
-    # it from the qualified checkout), not from whatever the branch holds now.
-    signers = run(["git", "-C", str(root), "show", f"{commit}:{ALLOWED_SIGNERS}"])
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".allowed_signers", delete=False) as stream:
         stream.write(signers)
 
@@ -612,7 +617,8 @@ def authorize(api, environment: dict, root: Path, directory: Path, *, verify=att
     # https://learn.microsoft.com/nuget/nuget-org/trusted-publishing
     # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery.Services/Authentication/Federated/GitHubTokenPolicyValidator.cs
     verify_publisher_environment(api, repository, policy, policy["release"]["environment"])
-    manifest["tagObject"] = verify_signed_tag(api, root, manifest)
+    signers = current_signers(api, repository, authority["commit"])
+    manifest["tagObject"] = verify_signed_tag(api, root, manifest, signers)
     manifest["authorityCommit"] = authority["commit"]
     # WHY: Earlier admissions, from earlier attempts or runs, must name the same candidate and tag object; a
     # different one would mean two candidates for one version (MySql, SafeMigrations and NestedSet).
@@ -831,9 +837,10 @@ def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=n
         # WHY: git verify-tag reads gpg.ssh.allowedSignersFile; a commit without a key there cannot get a tag that
         # the publish job accepts.
         # https://git-scm.com/docs/git-config#Documentation/git-config.txt-gpgsshallowedSignersFile
-        lines = run(["git", "-C", str(root), "show", f"{commit}:{ALLOWED_SIGNERS}"]).splitlines()
+        authority = observe_authority(api, repository)
+        lines = current_signers(api, repository, authority["commit"]).splitlines()
         keys = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
-        require(bool(keys), f"{ALLOWED_SIGNERS} of {commit} lists no key.")
+        require(bool(keys), f"{ALLOWED_SIGNERS} of main at {authority['commit']} lists no key.")
         return f"{len(keys)} keys"
 
     check("Changelog section", changelog, f"Add the section ## [{version}] - YYYY-MM-DD to CHANGELOG.md and merge it.")
@@ -843,7 +850,7 @@ def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=n
     check("Draft holds this run's candidate", draft_candidate, "Re-run the failed candidate jobs of this run.")
     check("Draft passes publish verification", draft_verified, "Delete the draft and start the candidate again.",
           "release")
-    check("Allowed signers listed", signers, f"Add the maintainer's public key to {ALLOWED_SIGNERS} on the line.")
+    check("Allowed signers listed", signers, f"Add the maintainer's public key to {ALLOWED_SIGNERS} on main.")
     # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
     require([item["subject"] for item in checks] == list(TAG_READINESS_CHECKS), "The tag check did not complete.")
     return {"repository": repository, "tag": tag, "commit": commit, "checks": checks,
@@ -1005,8 +1012,9 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
         return state["key"].split()[0]
 
     def signing_allowed() -> str:
-        signers = run(["git", "-C", str(root), "show", f"{state['commit']}:{ALLOWED_SIGNERS}"])
-        require(listed(state["key"], signers), f"The key is not listed in {ALLOWED_SIGNERS} of the line.")
+        authority = observe_authority(api, state["repository"])
+        signers = current_signers(api, state["repository"], authority["commit"])
+        require(listed(state["key"], signers), f"The key is not listed in {ALLOWED_SIGNERS} of main.")
         return ALLOWED_SIGNERS
 
     def signer_file() -> str:
@@ -1033,8 +1041,8 @@ def pre_tag(api, root: Path, version: str, *, fetcher=nuget.fetch, verify=attest
           "Merge the change through a pull request whose required checks passed.", "commit")
     check("SSH signing format", signing_format, "Set gpg.format to ssh in the Git configuration.")
     check("Signing key configured", signing_key, "Set user.signingkey to the SSH public key in the Git configuration.")
-    check("Signing key allowed", signing_allowed, f"Add the public key to {ALLOWED_SIGNERS} on the release line.",
-          "key", "commit")
+    check("Signing key allowed", signing_allowed, f"Add the public key to {ALLOWED_SIGNERS} on main.",
+          "key", "repository")
     check("Signer file for git tag -v", signer_file,
           "Set gpg.ssh.allowedSignersFile to a file that lists the public key.", "key")
     # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
