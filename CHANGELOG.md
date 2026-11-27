@@ -12,6 +12,34 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-27
+
+### Fixed
+
+- The publish action pushed every symbol package on every run, also when
+  resuming at a published release; nuget.org accepts such a repeated symbol
+  package and replaces the available one. It now asks the symbol server for
+  each Portable PDB first and pushes only the symbol packages whose PDBs are
+  not served, as MySql does.
+- `NuGet/login` and the push run only when a package or a symbol package is
+  missing, so a run with nothing to publish requests no key.
+- Authority, environment and the signed tag are checked again before the key
+  is requested and before every single push, not once before all pushes.
+- Tag verification, the `Tag check` of `release-candidate.yml` and
+  `pre-tag-check` read `.github/allowed_signers` from the current head of
+  `main` instead of the candidate commit. A key removed there no longer
+  counts for any tag, also when a run resumes days later.
+
+### Changed
+
+- The README has a table of contents, task headings in the infinitive and
+  `# v<version>` in its example pins instead of outdated versions. It is the
+  authoritative description of each workflow; `docs/overview.md` says so,
+  shows how the workflows work together, gives every diagram `accTitle` and
+  `accDescr`, drops the numbers from its headings and corrects two outdated
+  statements (product repositories do call the workflows; the release
+  admission is signed by the product's release workflow).
+
 ## [0.6.0] - 2026-11-27
 
 ### Added

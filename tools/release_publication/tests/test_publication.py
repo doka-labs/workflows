@@ -1,5 +1,8 @@
+import base64
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -193,8 +196,10 @@ class PackageInventoryTests(unittest.TestCase):
 class FakeFetcher:
     def __init__(self, responses):
         self.responses = responses
+        self.headers = {}
 
     def __call__(self, url, headers, timeout):
+        self.headers[url] = headers
         if url == nuget.INDEX:
             return 200, json.dumps({"resources": [{"@type": "PackageBaseAddress/3.0.0",
                                                    "@id": "https://api.nuget.org/v3-flatcontainer/"}]}).encode()
@@ -285,6 +290,57 @@ class NuGetTests(unittest.TestCase):
         # Assert
         self.assertEqual(["Doka.Core"], [item["id"] for item in result["packages"]])
         self.assertEqual([probe["url"]], result["symbols"])
+
+    def probe(self, content=b"pdb"):
+        return {"url": "https://symbols.nuget.org/download/symbols/x.pdb/k/x.pdb", "checksum": "SHA256:00",
+                "pdb": "lib/net10.0/Doka.Core.pdb", "package": self.inventory[0]["nupkg"],
+                "sha256": hashlib.sha256(content).hexdigest()}
+
+    def test_symbols_the_server_serves_are_not_pending(self):
+        # Arrange
+        probe = self.probe()
+        fetcher = FakeFetcher({probe["url"]: (200, b"pdb")})
+
+        # Act
+        pending = nuget.pending_symbols(self.inventory, [probe], fetcher=fetcher)
+
+        # Assert
+        self.assertEqual([], pending)
+        self.assertEqual({"SymbolChecksum": "SHA256:00"}, fetcher.headers[probe["url"]])
+
+    def test_symbols_the_server_does_not_serve_yet_are_pending(self):
+        # Arrange
+        probe = self.probe()
+        fetcher = FakeFetcher({probe["url"]: (404, b"")})
+
+        # Act
+        pending = nuget.pending_symbols(self.inventory, [probe], fetcher=fetcher)
+
+        # Assert
+        self.assertEqual([self.inventory[0]["snupkg"]], [package["snupkg"] for package in pending])
+
+    def test_symbols_with_other_bytes_on_the_server_fail(self):
+        # Arrange
+        probe = self.probe()
+        fetcher = FakeFetcher({probe["url"]: (200, b"other")})
+
+        # Act
+        with self.assertRaises(nuget.NuGetError) as raised:
+            nuget.pending_symbols(self.inventory, [probe], fetcher=fetcher)
+
+        # Assert
+        self.assertIn("serves another", str(raised.exception))
+
+    def test_package_without_a_symbol_probe_fails(self):
+        # Arrange
+        fetcher = FakeFetcher({})
+
+        # Act
+        with self.assertRaises(nuget.NuGetError) as raised:
+            nuget.pending_symbols(self.inventory, [], fetcher=fetcher)
+
+        # Assert
+        self.assertIn("has no symbol probe", str(raised.exception))
 
     def sdk(self):
         path = self.root / "product-global.json"
@@ -1132,46 +1188,60 @@ class SbomHandoffTests(unittest.TestCase):
 
 
 class PendingPackagesTests(unittest.TestCase):
-    def run_pending(self, states):
+    def run_pending(self, states, served):
         from tools.release_publication import __main__ as cli
 
         directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
         manifest = {"packages": [{"id": name, "nupkg": f"{name}.1.0.0.nupkg", "snupkg": f"{name}.1.0.0.snupkg"}
-                                 for name in ("Doka.Core", "Doka.Ext")]}
-        original = (publication.verify_candidate, nuget.availability)
-        publication.verify_candidate = lambda repository, path: manifest
-        nuget.availability = lambda path, rows: [{"id": name, "state": state} for name, state in states.items()]
-        try:
-            with unittest.mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": REPOSITORY}):
-                cli.main(["pending-packages", "--candidate", str(directory), "--output", str(directory / "p.txt"),
-                          "--symbols-output", str(directory / "s.txt")])
-        finally:
-            publication.verify_candidate, nuget.availability = original
+                                 for name in ("Doka.Core", "Doka.Ext")], "symbols": []}
+        output = directory / "github-output.txt"
+        with unittest.mock.patch.object(publication, "verify_candidate", lambda repository, path: manifest), \
+                unittest.mock.patch.object(nuget, "availability", lambda path, rows: [
+                    {"id": name, "state": state} for name, state in states.items()]), \
+                unittest.mock.patch.object(nuget, "pending_symbols", lambda rows, probes: [
+                    row for row in rows if row["id"] not in served]), \
+                unittest.mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": REPOSITORY,
+                                                        "GITHUB_OUTPUT": str(output)}):
+            cli.main(["pending-packages", "--candidate", str(directory), "--output", str(directory / "p.txt"),
+                      "--symbols-output", str(directory / "s.txt")])
 
         return ((directory / "p.txt").read_text(encoding="ascii").split(),
-                (directory / "s.txt").read_text(encoding="ascii").split())
+                (directory / "s.txt").read_text(encoding="ascii").split(), output.read_text(encoding="ascii"))
 
-    def test_symbols_of_pushed_primaries_are_pushed_again(self):
+    def test_published_release_has_nothing_to_push(self):
         # Arrange
-        states = {"Doka.Core": "present", "Doka.Ext": "present"}
+        states = {"Doka.Core": "matching", "Doka.Ext": "matching"}
 
         # Act
-        primaries, symbols = self.run_pending(states)
+        primaries, symbols, output = self.run_pending(states, {"Doka.Core", "Doka.Ext"})
 
         # Assert
-        self.assertEqual([], primaries)
-        self.assertEqual(["Doka.Core.1.0.0.snupkg", "Doka.Ext.1.0.0.snupkg"], symbols)
+        self.assertEqual(([], []), (primaries, symbols))
+        self.assertEqual("push=false\n", output)
+
+    def test_symbols_not_served_are_pushed_although_the_primary_is_on_nuget(self):
+        # Arrange
+        states = {"Doka.Core": "matching", "Doka.Ext": "matching"}
+
+        # Act
+        primaries, symbols, output = self.run_pending(states, {"Doka.Core"})
+
+        # Assert
+        self.assertEqual(([], ["Doka.Ext.1.0.0.snupkg"]), (primaries, symbols))
+        self.assertEqual("push=true\n", output)
 
     def test_only_absent_primaries_are_pending(self):
         # Arrange
-        states = {"Doka.Core": "present", "Doka.Ext": "absent"}
+        states = {"Doka.Core": "matching", "Doka.Ext": "absent"}
 
         # Act
-        primaries, symbols = self.run_pending(states)
+        primaries, symbols, output = self.run_pending(states, {"Doka.Core"})
 
         # Assert
         self.assertEqual(["Doka.Ext.1.0.0.nupkg"], primaries)
-        self.assertEqual(2, len(symbols))
+        self.assertEqual(["Doka.Ext.1.0.0.snupkg"], symbols)
+        self.assertEqual("push=true\n", output)
 
 
 class UnusedVersionTests(unittest.TestCase):
@@ -1424,8 +1494,10 @@ class TagReadinessTests(unittest.TestCase):
                 raise failure
 
         patches = {
-            "release_notes": lambda root, version: "notes", "run": lambda command, **kwargs: signers,
-            "observe_authority": lambda api, repository: {"policy": {"release": {"packages": ["Doka.Core"]}}},
+            "release_notes": lambda root, version: "notes", "run": lambda command, **kwargs: "",
+            "observe_authority": lambda api, repository: {"policy": {"release": {"packages": ["Doka.Core"]}},
+                                                          "commit": "m" * 40},
+            "current_signers": lambda api, repository, commit: signers if commit == "m" * 40 else "",
             "tag_exists": lambda api, repository, tag: tag_taken,
             "tags_on_commit": lambda root, commit: list(other_tags),
             "release_for": lambda api, repository, tag: {"id": 7, "draft": True, "tag_name": tag},
@@ -1539,6 +1611,41 @@ class TagReportTests(unittest.TestCase):
         self.assertNotIn("```sh", text)
 
 
+class CurrentSignersTests(unittest.TestCase):
+    def test_signers_are_read_from_the_authority_commit_and_checked_against_their_blob(self):
+        # Arrange
+        content = b'probe@example.invalid namespaces="git" ssh-ed25519 K\n'
+        blob = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+        routes = []
+
+        class Api:
+            def request(self, route, *arguments, **keywords):
+                routes.append(route)
+                return {"type": "file", "path": ".github/allowed_signers", "encoding": "base64", "sha": blob,
+                        "content": base64.b64encode(content).decode()}
+
+        # Act
+        signers = publication.current_signers(Api(), REPOSITORY, "m" * 40)
+
+        # Assert
+        self.assertEqual(content.decode(), signers)
+        self.assertEqual([f"repos/{REPOSITORY}/contents/.github/allowed_signers?ref={'m' * 40}"], routes)
+
+    def test_signers_that_differ_from_their_blob_fail(self):
+        # Arrange
+        class Api:
+            def request(self, route, *arguments, **keywords):
+                return {"type": "file", "path": ".github/allowed_signers", "encoding": "base64", "sha": "0" * 40,
+                        "content": base64.b64encode(b"x").decode()}
+
+        # Act
+        with self.assertRaises(publication.GitHubError) as raised:
+            publication.current_signers(Api(), REPOSITORY, "m" * 40)
+
+        # Assert
+        self.assertIn("differs from its Git blob", str(raised.exception))
+
+
 class PreTagTests(unittest.TestCase):
     """Runs the local check in a real repository with real SSH keys and an isolated Git configuration."""
 
@@ -1580,7 +1687,10 @@ class PreTagTests(unittest.TestCase):
             raise AssertionError(result.stderr)
         return result.stdout.strip() if check else result
 
-    def run_check(self, *, signing=None, tag_taken=False, taken=False, qualified=True, immutable=True):
+    def run_check(self, *, signing=None, tag_taken=False, taken=False, qualified=True, immutable=True,
+                  main_signers=None):
+        main_signers = ((self.root / publication.ALLOWED_SIGNERS).read_text(encoding="ascii")
+                        if main_signers is None else main_signers)
         for key, value in (self.signing if signing is None else signing).items():
             self.git("config", key, value)
 
@@ -1597,7 +1707,8 @@ class PreTagTests(unittest.TestCase):
 
         policy = {"release": {"packages": ["Doka.Core"]}}
         with unittest.mock.patch.multiple(
-                publication, observe_authority=lambda api, repository: {"policy": policy},
+                publication, observe_authority=lambda api, repository: {"policy": policy, "commit": "m" * 40},
+                current_signers=lambda api, repository, commit: main_signers if commit == "m" * 40 else "",
                 protected_head=lambda api, repository, ref: self.commit,
                 tag_exists=lambda api, repository, tag: tag_taken,
                 tags_on_commit=lambda root, commit: []), \
@@ -1639,6 +1750,17 @@ class PreTagTests(unittest.TestCase):
         self.assertEqual({"Signing key allowed", "Signer file for git tag -v"}, set(self.failed(result)))
         self.assertNotEqual(0, verified.returncode)
         self.assertIn("No principal matched", verified.stderr)
+
+    def test_key_removed_from_main_fails_although_the_line_still_lists_it(self):
+        # Arrange
+        main_signers = f'probe@example.invalid namespaces="git" {self.keys["other"]}\n'
+
+        # Act
+        result = self.run_check(main_signers=main_signers)
+
+        # Assert
+        self.assertEqual({"Signing key allowed"}, set(self.failed(result)))
+        self.assertIn("not listed in .github/allowed_signers of main", self.failed(result)["Signing key allowed"])
 
     def test_literal_signing_key_is_read(self):
         # Arrange

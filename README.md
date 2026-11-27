@@ -4,7 +4,37 @@ Reusable GitHub Actions workflows shared by the doka-labs repositories. Each
 workflow is maintained once here; repositories call it by commit SHA and keep
 their own inputs.
 
-## Calling a workflow
+[docs/overview.md](docs/overview.md) shows how the workflows work together; this
+README is the authoritative description of each workflow.
+
+## Contents
+
+- [Call a workflow](#call-a-workflow)
+- [Tools](#tools)
+- [Self check](#self-check)
+- [Release this repository](#release-this-repository)
+- [Workflows](#workflows)
+  - [`dependency-audit.yml`](#dependency-audityml)
+  - [`workflow-lint.yml`](#workflow-lintyml)
+  - [`dependency-review.yml`](#dependency-reviewyml)
+- [Release lines](#release-lines)
+  - [`release-policy-check.yml`](#release-policy-checkyml)
+  - [`release-lines-coordinator.yml`](#release-lines-coordinatoryml)
+  - [`release-line-guard.yml`](#release-line-guardyml)
+  - [`coverage-gate.yml`](#coverage-gateyml)
+- [Pull requests](#pull-requests)
+  - [`code-style.yml`](#code-styleyml)
+  - [`package-check.yml`](#package-checkyml)
+  - [`pr-assign.yml`](#pr-assignyml)
+  - [`decision-records.yml`](#decision-recordsyml)
+  - [`architecture-document.yml`](#architecture-documentyml)
+  - [Documentation-only changes](#documentation-only-changes)
+- [Releases](#releases)
+  - [`api-reference.yml`](#api-referenceyml)
+- [Community and support](#community-and-support)
+- [License](#license)
+
+## Call a workflow
 
 Pin the call to a full commit SHA and keep the version as a comment so
 Dependabot can update it. Dependabot updates both the SHA and the comment of a
@@ -15,7 +45,7 @@ from this repository's tags, listed in `CHANGELOG.md`:
 ```yaml
 jobs:
   dependency-review:
-    uses: doka-labs/workflows/.github/workflows/dependency-review.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/dependency-review.yml@<commit-sha> # v<version>
 ```
 
 ## Tools
@@ -42,7 +72,7 @@ output directories carried the NuGet HTTP cache into audit evidence and, in
 one repository, about 53 GB of uncompressed EF migration bundles into CI
 evidence within 14 days.
 
-## Releasing this repository
+## Release this repository
 
 A version of this repository is released in three steps:
 
@@ -95,7 +125,7 @@ permissions:
 
 jobs:
   dependency-audit:
-    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v<version>
 ```
 
 The tool lives in `tools/dependency_audit/`.
@@ -114,7 +144,7 @@ Use a Linux x64 runner for the pinned actionlint binary and zizmor wheel.
 ```yaml
 jobs:
   workflow-lint:
-    uses: doka-labs/workflows/.github/workflows/workflow-lint.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/workflow-lint.yml@<commit-sha> # v<version>
 ```
 
 ### `dependency-review.yml`
@@ -149,7 +179,7 @@ concurrency:
 
 jobs:
   dependency-review:
-    uses: doka-labs/workflows/.github/workflows/dependency-review.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/dependency-review.yml@<commit-sha> # v<version>
 ```
 
 The check reported to GitHub is named `<caller job> / Review`, for example
@@ -198,7 +228,7 @@ it from the repository's CI:
 ```yaml
 jobs:
   release-policy:
-    uses: doka-labs/workflows/.github/workflows/release-policy-check.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-policy-check.yml@<commit-sha> # v<version>
 ```
 
 ### `release-lines-coordinator.yml`
@@ -233,7 +263,7 @@ jobs:
     permissions:
       contents: read
       actions: write
-    uses: doka-labs/workflows/.github/workflows/release-lines-coordinator.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-lines-coordinator.yml@<commit-sha> # v<version>
     with:
       workload: audit
 ```
@@ -274,7 +304,7 @@ permissions:
 
 jobs:
   guard:
-    uses: doka-labs/workflows/.github/workflows/release-line-guard.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-line-guard.yml@<commit-sha> # v<version>
     with:
       maintenance: ${{ inputs.maintenance || false }}
       schedule-correlation: ${{ inputs.schedule-correlation || '' }}
@@ -283,7 +313,7 @@ jobs:
   dependency-audit:
     needs: guard
     if: needs.guard.outputs.proceed == 'true'
-    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/dependency-audit.yml@<commit-sha> # v<version>
 ```
 
 ### `coverage-gate.yml`
@@ -371,7 +401,7 @@ jobs:
   assign:
     permissions:
       pull-requests: write
-    uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/pr-assign.yml@<commit-sha> # v<version>
 ```
 
 ### `decision-records.yml`
@@ -394,7 +424,7 @@ version of this repository.
 ```yaml
 jobs:
   decision-records:
-    uses: doka-labs/workflows/.github/workflows/decision-records.yml@<commit-sha> # v0.2.0
+    uses: doka-labs/workflows/.github/workflows/decision-records.yml@<commit-sha> # v<version>
 ```
 
 ### `architecture-document.yml`
@@ -428,7 +458,7 @@ hand and released as a new version of this repository.
 ```yaml
 jobs:
   architecture-document:
-    uses: doka-labs/workflows/.github/workflows/architecture-document.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/architecture-document.yml@<commit-sha> # v<version>
     with:
       solution: Doka.Example.slnx
 ```
@@ -494,12 +524,12 @@ permissions:
 
 jobs:
   scope:
-    uses: doka-labs/workflows/.github/workflows/change-scope.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/change-scope.yml@<commit-sha> # v<version>
 
   style:
     needs: scope
     if: needs.scope.outputs.scope == 'full'
-    uses: doka-labs/workflows/.github/workflows/code-style.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/code-style.yml@<commit-sha> # v<version>
     with:
       solution: Doka.Example.slnx
 
@@ -519,7 +549,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: doka-labs/workflows/.github/workflows/package-check.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/package-check.yml@<commit-sha> # v<version>
     with:
       version: ${{ needs.build.outputs.version }}
       packages-artifact: packages
@@ -527,7 +557,7 @@ jobs:
   required:
     needs: [scope, style, build, packages]
     if: always()
-    uses: doka-labs/workflows/.github/workflows/required-gate.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/required-gate.yml@<commit-sha> # v<version>
     with:
       results: ${{ toJSON(needs) }}
       scope: ${{ needs.scope.outputs.scope }}
@@ -542,7 +572,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-pr-attestation.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-pr-attestation.yml@<commit-sha> # v<version>
 ```
 
 The required check is then `required / Required`. `release-pr-attestation.yml`
@@ -567,7 +597,7 @@ the changelog section, the origin repository, immutable releases, a clean
 checkout on the current head of the line, the tag and the version unused, no
 other version tag on the commit, the pull request qualification of the
 commit's tree, and the signing setup (`gpg.format` ssh, `user.signingkey`, the
-key in `.github/allowed_signers` of the commit and in
+key in `.github/allowed_signers` of the current head of `main` and in
 `gpg.ssh.allowedSignersFile` for `git tag -v`). A check whose input failed
 says what it waits for.
 
@@ -618,9 +648,9 @@ between them:
    line pins: the changelog section, the tag and the version still unused, no
    other version tag on the commit, the draft holding this run's candidate and
    passing the publish job's verification, and a key in
-   `.github/allowed_signers` of the commit. The draft exists only in this run,
-   and the other checks are repeated because the line or nuget.org can change
-   after the local check. Its summary lists one line `OK` or `FAIL` per check.
+   `.github/allowed_signers` of the current head of `main`. The draft exists
+   only in this run, and the other checks are repeated because the line or
+   nuget.org can change after the local check. Its summary lists one line `OK` or `FAIL` per check.
    When all pass and the publish job waits for approval, the maintainer
    creates the SSH-signed annotated tag `v<version>` on the candidate commit in
    their checkout of the line, verifies it with `git tag -v` and pushes only
@@ -632,11 +662,17 @@ between them:
    `.github/actions/release-publish` of this repository. After approval it
    rechecks the assets against their attestations, the policy on `main`, the
    reviewers and branch grants of `release.environment`, that the run comes
-   from `release.workflowPath`, and the signed tag, and attests the admission.
+   from `release.workflowPath`, and the signed tag against
+   `.github/allowed_signers` of the current head of `main`, so a key removed
+   there stops counting at once, also for older tags; it then attests the
+   admission.
    The tools request no OIDC token of their own; nuget.org compares the token
    of `NuGet/login` with the Trusted Publishing policy. Before
    pushing, it checks the existing Latest release and verifies the current
-   draft assets. It pushes what nuget.org does not hold yet, reads every
+   draft assets. It requests a NuGet key and pushes only when nuget.org does
+   not hold a package yet or the symbol server does not serve a package's
+   Portable PDBs yet, and checks again before every single push; a run that
+   resumes at a published release writes nothing to nuget.org. It reads every
    package back signed and every Portable PDB from the symbol server,
    restores every package from nuget.org only in an isolated consumer,
    compares the current draft with the candidate
@@ -690,7 +726,7 @@ jobs:
     permissions:
       contents: write
       attestations: read
-    uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-preflight.yml@<commit-sha> # v<version>
     with:
       version: ${{ inputs.version }}
       qualification-only: ${{ inputs.qualification-only }}
@@ -710,7 +746,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-qualification.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-qualification.yml@<commit-sha> # v<version>
     with:
       version: ${{ inputs.version }}
       qualification-only: ${{ inputs.qualification-only }}
@@ -724,7 +760,7 @@ jobs:
       actions: read
       id-token: write
       attestations: write
-    uses: doka-labs/workflows/.github/workflows/release-candidate.yml@<commit-sha> # v0.1.0
+    uses: doka-labs/workflows/.github/workflows/release-candidate.yml@<commit-sha> # v<version>
     with:
       version: ${{ inputs.version }}
       packages-artifact: packages
@@ -759,7 +795,7 @@ jobs:
     # readback alone may wait one hour. 180 minutes is NestedSet's limit.
     timeout-minutes: 180
     steps:
-      - uses: doka-labs/workflows/.github/actions/release-publish@<commit-sha> # v0.5.0
+      - uses: doka-labs/workflows/.github/actions/release-publish@<commit-sha> # v<version>
         with:
           tag: ${{ needs.preflight.outputs.tag }}
           nuget-user: ${{ secrets.NUGET_USER }}
@@ -773,7 +809,7 @@ jobs:
       contents: read
       pages: write
       id-token: write
-    uses: doka-labs/workflows/.github/workflows/api-reference.yml@<commit-sha> # v0.3.0
+    uses: doka-labs/workflows/.github/workflows/api-reference.yml@<commit-sha> # v<version>
     with:
       tag: ${{ needs.preflight.outputs.tag }}
 ```

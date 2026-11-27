@@ -156,6 +156,39 @@ def validate_symbol_probes(probes: list[dict]) -> None:
             raise NuGetError(f"Two symbol probes of {probe['pdb']} expect different bytes at one URL.")
 
 
+def require_symbol(probe: dict, fetcher=fetch) -> None:
+    """Require the symbol server to serve exactly the probe's Portable PDB; raise PendingError while it does not."""
+    # WHY: symbols.nuget.org returns a Portable PDB only with the checksum the assembly carries in the SymbolChecksum
+    # header (403 without it, 200 with it for Doka.NestedSet 10.4.0 and Doka.Tabular 1.0.0-rc.1; MySql's
+    # fetch_remote_symbol sends the same header). The documentation does not describe the header.
+    status, content = fetcher(probe["url"], {"SymbolChecksum": probe["checksum"]}, 30)
+    require_response(status, probe["pdb"])
+    if hashlib.sha256(content).hexdigest() != probe["sha256"]:
+        raise NuGetError(f"The symbol server serves another {probe['pdb']}.")
+
+
+def pending_symbols(inventory: list[dict], probes: list[dict], *, fetcher=fetch) -> list[dict]:
+    """Return the packages whose Portable PDBs the symbol server does not serve yet, in inventory order."""
+    # WHY: nuget.org accepts a repeated symbol package and replaces an available one with it; it refuses one with 409
+    # only while a symbol package of that version validates (NuGetGallery SymbolPackageUploadService). MySql therefore
+    # asks the symbol server first and pushes only the symbol packages whose PDBs are missing.
+    # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
+    validate_symbol_probes(probes)
+    pending = []
+    for package in inventory:
+        owned = [probe for probe in probes if probe["package"] == package["nupkg"]]
+        if not owned:
+            raise NuGetError(f"{package['nupkg']} has no symbol probe.")
+
+        try:
+            for probe in owned:
+                require_symbol(probe, fetcher)
+        except PendingError:
+            pending.append(package)
+
+    return pending
+
+
 def readback(directory: Path, inventory: list[dict], probes: list[dict], work: Path, sdk: Path, *, fetcher=fetch,
              verifier=verify_signature, clock=time.monotonic, sleep=time.sleep,
              timeout: int = READBACK_SECONDS) -> dict:
@@ -198,14 +231,7 @@ def readback(directory: Path, inventory: list[dict], probes: list[dict], work: P
                     continue
 
                 try:
-                    # WHY: symbols.nuget.org returns a Portable PDB only with the checksum the assembly carries in
-                    # the SymbolChecksum header (403 without it, 200 with it for Doka.NestedSet 10.4.0; the header
-                    # name is the one NestedSet's readback uses). The documentation does not describe the header.
-                    status, content = fetcher(probe["url"], {"SymbolChecksum": probe["checksum"]}, 30)
-                    require_response(status, probe["pdb"])
-                    if hashlib.sha256(content).hexdigest() != probe["sha256"]:
-                        raise NuGetError(f"The symbol server serves another {probe['pdb']}.")
-
+                    require_symbol(probe, fetcher)
                     symbols.add(probe["url"])
                 except PendingError as error:
                     pending.append(str(error))

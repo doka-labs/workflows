@@ -128,7 +128,8 @@ def main(argv: list[str] | None = None) -> int:
     pending = commands.add_parser("pending-packages")
     pending.add_argument("--candidate", type=Path, required=True)
     pending.add_argument("--output", type=Path, required=True, help="Primary packages nuget.org does not hold.")
-    pending.add_argument("--symbols-output", type=Path, required=True, help="Every symbol package.")
+    pending.add_argument("--symbols-output", type=Path, required=True,
+                         help="Symbol packages whose PDBs are not served yet.")
     readback = commands.add_parser("readback")
     readback.add_argument("--candidate", type=Path, required=True)
     readback.add_argument("--work", type=Path, required=True)
@@ -249,15 +250,16 @@ def main(argv: list[str] | None = None) -> int:
             absent = [item["id"] for item in states if item["state"] == "absent"]
             rows = [package for package in manifest["packages"] if package["id"] in absent]
             # WHY: Every primary package before every symbol package, each list in dependency order (NestedSet).
-            # Symbol packages are listed for every package, not only for pending primaries: an attempt that stopped
-            # after a primary push would otherwise never push its symbols. NestedSet and SafeMigrations push all
-            # symbol packages on every publication run for the same reason; nuget.org replaces an available symbol
-            # package with the same candidate bytes and refuses one with 409 only while that version validates.
-            # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
+            # A symbol package is listed while its Portable PDBs are not served yet, also when its primary is already
+            # on nuget.org, so an attempt that stopped between the two pushes still delivers it. One whose PDBs are
+            # served is left out: nuget.org would accept it again and replace the available one (MySql's preflight
+            # pushes only missing symbols and requests a key only when anything is missing).
+            symbols = nuget.pending_symbols(manifest["packages"], manifest["symbols"])
             args.output.write_text("".join(f"{row['nupkg']}\n" for row in rows), encoding="ascii")
-            args.symbols_output.write_text("".join(f"{row['snupkg']}\n" for row in manifest["packages"]),
-                                           encoding="ascii")
+            args.symbols_output.write_text("".join(f"{row['snupkg']}\n" for row in symbols), encoding="ascii")
+            _output("push", "true" if rows or symbols else "false")
             print(f"{len(rows)} of {len(manifest['packages'])} primary packages still need to be pushed.")
+            print(f"{len(symbols)} of {len(manifest['packages'])} symbol packages still need to be pushed.")
             return 0
 
         if args.command == "readback":

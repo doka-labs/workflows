@@ -5,11 +5,13 @@ checks, what it may write, and what happens when a step fails. Every name
 below is a workflow file, job, step, input, artifact or function of this
 repository; the diagrams follow the code, not a plan.
 
-Product repositories do not call these workflows yet. Where a diagram shows
-the product side, it shows the intended integration; the caller's own
-workflow and job names are the product's choice.
+The [README](../README.md) is the authoritative description of each
+workflow: its inputs, defaults, permissions and behavior. This overview shows
+how the workflows work together; where the two differ, the README applies.
+Product repositories call the workflows from their own workflow files, so the
+caller's workflow and job names in the diagrams are examples.
 
-## 1. Building blocks and their callers
+## Building blocks and their callers
 
 A product repository keeps its own workflow files. They call the reusable
 workflows of this repository by commit SHA; each reusable workflow checks out
@@ -21,6 +23,8 @@ copy of this repository the runner downloads with the action.
 
 ```mermaid
 flowchart LR
+  accTitle: Building blocks and their callers
+  accDescr: Product workflows call the reusable workflows and the publish action of this repository by commit SHA; each runs the tools from its own commit.
   subgraph product["Product repository (caller workflows)"]
     ci["pull request workflow<br/>pull_request"]
     schedule["schedule workflow on main<br/>schedule"]
@@ -60,10 +64,12 @@ flowchart LR
   helper -. "every job checks out" .-> tools
 ```
 
-## 2. What a product repository provides
+## What a product repository provides
 
 ```mermaid
 flowchart LR
+  accTitle: What a product repository provides
+  accDescr: The files and settings a product repository keeps and which workflow reads each of them.
   subgraph files["Files in the product repository"]
     rp[".github/release-policy.json"]
     cp[".github/coverage-policy.json"]
@@ -104,7 +110,7 @@ flowchart LR
   rs --> pre2
 ```
 
-## 3. The release policy and who reads it
+## The release policy and who reads it
 
 `.github/release-policy.json` is read from the current head of protected
 `main` through the API whenever a step grants something (dispatch, admission,
@@ -114,6 +120,8 @@ checkout's own copy, so a pull request can change the policy.
 
 ```mermaid
 flowchart TB
+  accTitle: Release policy readers
+  accDescr: Which steps read the release policy from protected main and which read the checkout's copy.
   policy[".github/release-policy.json"]
   policy --> lines["lines<br/>sourceRef, role, packageMajor,<br/>channel, upstreamStage, state"]
   policy --> release["release<br/>workflowPath, environment, packages"]
@@ -131,7 +139,7 @@ flowchart TB
   release --> u7["release workflow entry, publisher environment,<br/>package IDs for unused-version, validation, coverage"]
 ```
 
-## 4. Release lines
+## Release lines
 
 Each line is one branch. Role, ref, channel and upstream stage are tied
 together (`_line` in `tools/release_lines/policy.py`); the state decides what
@@ -140,6 +148,8 @@ against `main`; the policy prescribes no order of states.
 
 ```mermaid
 flowchart LR
+  accTitle: Release lines
+  accDescr: Line roles, their fixed form and the purposes each line state allows.
   subgraph roles["Role and its fixed form"]
     main["main<br/>refs/heads/main<br/>GA upstream, stable-and-prerelease"]
     maint["maintenance<br/>refs/heads/maintenance/N.x<br/>GA upstream, stable-and-prerelease"]
@@ -161,10 +171,12 @@ Exactly one main line; every `sourceRef` once; at most one active line per
 package major, so two branches never publish into the same versions; a
 version must have the major of its line.
 
-## 5. Pull request
+## Pull request
 
 ```mermaid
 flowchart LR
+  accTitle: Pull request
+  accDescr: A pull request computes its change scope, runs the required checks and attests the tested merge tree.
   pr(["pull_request"]) --> scope["change-scope<br/>git diff from base to merge commit;<br/>docs only for declared paths that no build input<br/>and no tracked non-documentation file names"]
   pr --> lint["workflow-lint"]
   pr --> assign["pr-assign<br/>author as assignee,<br/>not for bots or forks"]
@@ -188,10 +200,12 @@ on; it does not expire like an artifact. A required check whose workflow a path
 filter skips stays pending, so the CI workflow always starts and only its jobs
 are skipped.
 
-## 6. Checks of every change in detail
+## Checks of every change in detail
 
 ```mermaid
 flowchart TB
+  accTitle: Checks of every change
+  accDescr: What workflow lint, dependency review, the scheduled dependency audit and the coverage gate check for a change.
   subgraph lintbox["workflow-lint"]
     l1["actionlint 1.7.12, checksum-verified"] --> l2["zizmor 1.32.0 from hash-pinned<br/>requirements, offline, persona regular"] --> l3["shellcheck on every tracked *.sh,<br/>severity warning"]
   end
@@ -211,12 +225,14 @@ flowchart TB
   end
 ```
 
-## 7. Release-line guard
+## Release-line guard
 
 The first job of a workload decides whether the rest may run.
 
 ```mermaid
 flowchart TB
+  accTitle: Release-line guard
+  accDescr: The first job of a workload decides from the event and the policy whether the rest may run.
   start(["workload run"]) --> m{"maintenance input<br/>or schedule event?"}
   m -- "neither: pull request, push,<br/>manual run" --> go1(["proceed"])
   m -- maintenance --> d1{"workflow_dispatch, GITHUB_SHA equals<br/>schedule-source-sha, valid correlation,<br/>running workflow is a declared workload?"}
@@ -231,10 +247,12 @@ flowchart TB
   s2 -- no --> skip(["skip: proceed=false"])
 ```
 
-## 8. Scheduled maintenance of all active lines
+## Scheduled maintenance of all active lines
 
 ```mermaid
 sequenceDiagram
+  accTitle: Scheduled maintenance
+  accDescr: The coordinator on main dispatches a workload on every other active line and verifies each run.
   autonumber
   participant S as schedule workflow on main
   participant C as release-lines-coordinator
@@ -262,13 +280,15 @@ sequenceDiagram
   C->>C: report artifact per line, one failing line never hides another
 ```
 
-## 9. Release run
+## Release run
 
 One run per version, started by `workflow_dispatch` on the line's branch. A
 later run of the same version finds the draft and continues at publication.
 
 ```mermaid
 flowchart TB
+  accTitle: Release run
+  accDescr: One run per version from the local pre-tag check through preflight, tests, qualification, candidate, tag and publication.
   local(["maintainer: eng/pre-tag-check.sh VERSION<br/>workflows at the line's pin, no writes"]) --> start
   start(["workflow_dispatch<br/>version, qualification-only"]) --> pre["release-preflight<br/>see 10"]
   pre --> resume{"release with candidate.json<br/>for this version, a draft complete?"}
@@ -288,10 +308,12 @@ flowchart TB
   done2 --> site["api-reference<br/>DocFX site from the tag; deployed to Pages once the release<br/>is published and no published release is higher<br/>(stable first, pre-releases before the first stable)"]
 ```
 
-## 10. Preflight
+## Preflight
 
 ```mermaid
 flowchart TB
+  accTitle: Preflight
+  accDescr: The checks before any test runs: dispatch, line, head, notes, tag, version and an existing draft.
   p1["started by workflow_dispatch from release.workflowPath"] --> p2["line of the ref may publish<br/>(or qualify for qualification-only)"]
   p2 --> p3["run is on the current head of the protected line"] --> p4["CHANGELOG.md has a reviewed section"]
   p4 --> r{"release of v&lt;version&gt; exists?<br/>(drafts need contents: write)"}
@@ -305,10 +327,12 @@ flowchart TB
   r -- no --> t1["tag v&lt;version&gt; does not exist"] --> t2["commit carries no other tag"] --> t3["version absent on nuget.org<br/>for every release package"] --> out2(["resume=false"])
 ```
 
-## 11. Qualification
+## Qualification
 
 ```mermaid
 flowchart TB
+  accTitle: Qualification
+  accDescr: Gates, test results and package validation are checked and the snapshot and qualification are attested.
   q1["checkout tree equals the run's commit tree"] --> q2["freeze the line from the policy on main<br/>(snapshot, qualificationOnly for prepared lines)"]
   q2 --> q3{"protected-check gates?"}
   q3 -- yes --> q4["verify pr-qualification-v1 for this tree, line and workflow;<br/>scope docs: walk back through baseTree to a full one,<br/>recompute every step with git diff (at most 50);<br/>every protected gate succeeded in the full one"]
@@ -321,10 +345,12 @@ flowchart TB
   q8 --> q9[("attest release-line-snapshot-v1<br/>and release-qualification-v1, subject: tree")]
 ```
 
-## 12. Candidate job
+## Candidate job
 
 ```mermaid
 flowchart TB
+  accTitle: Candidate job
+  accDescr: The packages are checked, restored in consumers, described by SBOMs, attested and staged in a draft release.
   c1["download the packages artifact"] --> c2["install sbom-tool 4.1.5, checksum-verified"]
   c2 --> c3["per package: isolated consumer restores it from<br/>a feed of the candidate packages only,<br/>restored archives byte-identical to the candidate,<br/>no test or build tooling in the graph"]
   c3 --> c4["per package: SPDX 2.2 SBOM from that consumer,<br/>validated by sbom-tool, exact dependency closure,<br/>describes exactly the candidate archive"]
@@ -336,7 +362,7 @@ flowchart TB
   c8 --> s1["SBOM job per package: packages artifact and sboms.json,<br/>write the SBOM, both digests equal the candidate"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
 ```
 
-## 13. Publish job
+## Publish job
 
 The publish job is defined in the product repository's release workflow and
 calls the composite action `.github/actions/release-publish`: nuget.org
@@ -348,12 +374,16 @@ observed, never replaced.
 
 ```mermaid
 flowchart TB
-  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>run from release.workflowPath of the policy,<br/>signed tag verified locally and by GitHub, commit on the line,<br/>earlier admissions name the same tag object"]
+  accTitle: Publish job
+  accDescr: After approval the candidate is rechecked, missing packages and symbols are pushed, read back and the immutable release is published.
+  dl["download every draft asset by release ID"] --> auth["authorize<br/>assets equal candidate.json, provenance covers every package,<br/>SBOM attestations equal the SBOMs, qualification from the candidate's run,<br/>policy on main allows publication, environment grants exactly the active lines,<br/>run from release.workflowPath of the policy,<br/>signed tag verified locally and by GitHub against the signers of main, commit on the line,<br/>earlier admissions name the same tag object"]
   auth --> adm[("attest release-admission-v1")]
-  adm --> pending["list packages nuget.org does not hold<br/>(other bytes there: stop)"]
-  pending --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]
-  login --> recheck["recheck authorization, Latest and live draft assets"]
-  recheck --> push["dotnet nuget push in dependency order:<br/>pending primaries with --no-symbols,<br/>then every symbol package, --skip-duplicate"]
+  adm --> pending["list packages nuget.org does not hold<br/>and symbol packages whose PDBs are not served<br/>(other bytes there: stop)"]
+  pending --> any{"anything missing?"}
+  any -- "no: no key, no push" --> readback
+  any -- yes --> recheck["recheck authorization, Latest and live draft assets"]
+  recheck --> login["NuGet/login: short-lived key<br/>through Trusted Publishing"]
+  login --> push["dotnet nuget push in dependency order, recheck before each:<br/>pending primaries with --no-symbols,<br/>then symbol packages whose PDBs are not served, --skip-duplicate"]
   push --> readback{"signed packages and Portable PDBs<br/>served within one hour?"}
   readback -- "no: end without failure" --> rerun(["re-run the job later"])
   readback -- yes --> consumer["restore every package from nuget.org only;<br/>payload equals the candidate"]
@@ -363,10 +393,12 @@ flowchart TB
   rel --> verify["release immutable, gh release verify,<br/>gh release verify-asset for every asset,<br/>whole asset inventory equals the candidate,<br/>Latest confirmed"]
 ```
 
-## 14. Data between jobs
+## Data between jobs
 
 ```mermaid
 flowchart LR
+  accTitle: Data between jobs
+  accDescr: Which artifacts, attestations and release assets pass data from one job to the next.
   build["product build"] --> pa[("packages artifact")] --> cand["Candidate"]
   tests["product tests"] --> trx[("TRX artifacts")] --> qual["Qualification"]
   tests --> cob[("Cobertura artifacts")] --> cov["coverage-gate"]
@@ -391,13 +423,15 @@ flowchart LR
 Artifacts live only as long as the retention setting; everything a later run
 relies on is an attestation or a release asset.
 
-## 15. Permissions
+## Permissions
 
 Each job asks for the least the API calls need; the top-level default of every
 workflow is `contents: read`.
 
 ```mermaid
 flowchart TB
+  accTitle: Permissions
+  accDescr: The token permissions each job requests.
   subgraph read["contents: read only"]
     r1["workflow-lint"]
     r2["release-policy-check"]
@@ -427,10 +461,12 @@ flowchart TB
   w3 --> nuget["nuget.org Trusted Publishing:<br/>OIDC token -> short-lived API key"]
 ```
 
-## 16. Failure and resume
+## Failure and resume
 
 ```mermaid
 flowchart TB
+  accTitle: Failure and resume
+  accDescr: What a failure in each stage leaves behind and how the next run or rerun continues.
   f1["preflight fails"] --> x1["nothing written; fix line, notes or version,<br/>start a new run"]
   f2["product job or qualification fails"] --> x2["nothing published; re-run the failed jobs<br/>or start a new run"]
   f3["Candidate fails"] --> x3["re-run: stage keeps matching assets, replaces<br/>those of the unfinished attempt and uploads<br/>candidate.json last; a complete candidate in<br/>the draft is never replaced"]
@@ -441,13 +477,19 @@ flowchart TB
   f8["one maintenance line fails"] --> x8["coordinator reports it; the other lines<br/>are still dispatched and checked"]
 ```
 
-## 17. Attestations and what checks them
+## Attestations and what checks them
 
-All attestations are signed by a reusable workflow of this repository, so
-`gh attestation verify --signer-workflow` accepts nothing else.
+`gh attestation verify --signer-workflow` checks the expected signer for each
+predicate: a reusable workflow of this repository for the pull request
+qualification, the line snapshot, the release qualification, the provenance
+and the SBOMs; the product's release workflow for the release admission,
+because the publish job runs there (`attestation.release_signer`). GitHub
+generates the immutable release attestation when the release is published.
 
 ```mermaid
 flowchart LR
+  accTitle: Attestations
+  accDescr: Which workflow signs each attestation and which step verifies it.
   prat["release-pr-attestation"] -- signs --> a1[("pr-qualification-v1<br/>subject: tree")]
   qual["release-qualification"] -- signs --> a2[("release-line-snapshot-v1<br/>subject: tree")]
   qual -- signs --> a3[("release-qualification-v1<br/>subject: tree")]
@@ -464,10 +506,12 @@ flowchart LR
   a7 -- "verified by" --> pub
 ```
 
-## 18. Dependabot configuration
+## Dependabot configuration
 
 ```mermaid
 flowchart LR
+  accTitle: Dependabot configuration
+  accDescr: The template and the active lines render dependabot.yml, and the release policy check compares it with the committed file.
   t[".github/dependabot-template.yml<br/>one entry per ecosystem and directory,<br/>no target-branch"] --> r["render-dependabot"]
   p["release-policy.json<br/>active lines, toolchain"] --> r
   r --> o["dependabot.yml<br/>every entry once per active line,<br/>SDK without major updates,<br/>framework and ceiling packages below the next major"]
@@ -476,10 +520,12 @@ flowchart LR
   c -- yes --> ok(["check passes"])
 ```
 
-## 19. This repository itself
+## This repository itself
 
 ```mermaid
 flowchart LR
+  accTitle: This repository
+  accDescr: Changes run the self check; a signed tag on the merge commit publishes the release, and Dependabot proposes it to product repositories.
   change["change in doka-labs/workflows"] --> sc["self-check.yml on pull_request<br/>and push to main"]
   sc --> lint["Lint: workflow-lint.yml via $/"]
   sc --> tests["Tool Tests: unit tests of tools/<br/>with the SDK of global.json"]

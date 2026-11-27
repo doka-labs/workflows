@@ -107,7 +107,11 @@ runs:
         predicate-type: https://github.com/doka-labs/workflows/blob/main/docs/predicates/release-admission-v1.md
         predicate-path: ${{ steps.authorize.outputs.admission }}
 
-    - name: List the packages nuget.org does not hold yet
+    # WHY: A package is pending while nuget.org does not hold it, a symbol package while the symbol server does not
+    # serve its Portable PDBs. Only then is a key requested and anything pushed, as MySql's preflight decides; a run
+    # that resumes at a published release writes nothing to nuget.org.
+    - name: List the packages and symbols nuget.org does not serve yet
+      id: pending
       shell: bash
       working-directory: ${{ github.action_path }}/../../..
       env:
@@ -116,45 +120,54 @@ runs:
         python3 -E -s -m tools.release_publication pending-packages --candidate "$RUNNER_TEMP/candidate"
         --output "$RUNNER_TEMP/pending.txt" --symbols-output "$RUNNER_TEMP/symbols.txt"
 
-    - name: Obtain a short-lived NuGet credential
-      id: login
-      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
-      with:
-        user: ${{ inputs.nuget-user }}
-
-    # WHY: Bytes, attestations, authority, environment and tag are checked again right before the first
-    # irreversible write (MySql, SafeMigrations and NestedSet).
-    - name: Recheck before pushing to nuget.org
+    # WHY: Bytes, attestations, authority, environment and tag are checked again before the NuGet credential is
+    # requested (SafeMigrations' "Recheck current permission before NuGet credentials").
+    - name: Recheck before requesting a NuGet credential
+      if: steps.pending.outputs.push == 'true'
       shell: bash
       working-directory: ${{ github.action_path }}/../../..
       env:
         GH_TOKEN: ${{ github.token }}
       run: python3 -E -s -m tools.release_publication recheck --root "$GITHUB_WORKSPACE/repository" --candidate "$RUNNER_TEMP/candidate"
 
-    # WHY: --skip-duplicate keeps a package that another attempt pushed in the meantime from failing the push;
-    # its bytes were compared with the candidate in the previous step and are read back below. --no-symbols
-    # keeps the primary push from also pushing the .snupkg next to it, so every primary precedes every symbol
-    # package; the symbol packages follow for every package, because an attempt can stop between the two
-    # pushes (NestedSet and SafeMigrations push all symbol packages on every run). nuget.org refuses a symbol
-    # package with 409 only while one of that version is validating, which --skip-duplicate skips; otherwise it
-    # accepts the same candidate bytes again and replaces the available one with them.
+    - name: Obtain a short-lived NuGet credential
+      if: steps.pending.outputs.push == 'true'
+      id: login
+      uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+      with:
+        user: ${{ inputs.nuget-user }}
+
+    # WHY: The check runs again right before each irreversible push, as MySql's recheck-publication.sh does before
+    # every write. --skip-duplicate keeps a package that another attempt pushed in the meantime from failing the
+    # push; its bytes were compared with the candidate before and are read back below. --no-symbols keeps the
+    # primary push from also pushing the .snupkg next to it, so every primary precedes every symbol package. A
+    # symbol package that another attempt pushed and that still validates is refused with 409, which
+    # --skip-duplicate skips. The product's global.json selects the SDK from the working directory.
     # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-push
     # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
-    # WHY: The product's global.json selects the SDK from the current working directory.
     # https://learn.microsoft.com/dotnet/core/tools/global-json
-    - name: Push the pending packages, then every symbol package
+    - name: Push the pending packages, then the pending symbol packages
+      if: steps.pending.outputs.push == 'true'
       shell: bash
       working-directory: repository
       env:
+        GH_TOKEN: ${{ github.token }}
         NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
+        TOOLS: ${{ github.action_path }}/../../..
       run: |
+        recheck() {
+          (cd "$TOOLS" && python3 -E -s -m tools.release_publication recheck \
+            --root "$GITHUB_WORKSPACE/repository" --candidate "$RUNNER_TEMP/candidate")
+        }
         while IFS= read -r package; do
           [ -n "$package" ] || continue
+          recheck
           dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" --no-symbols --skip-duplicate --timeout 300
         done < "$RUNNER_TEMP/pending.txt"
         while IFS= read -r package; do
           [ -n "$package" ] || continue
+          recheck
           dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" --skip-duplicate --timeout 300
         done < "$RUNNER_TEMP/symbols.txt"
