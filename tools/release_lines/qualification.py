@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -42,6 +43,8 @@ TRX_SKIP_REASONS = (
     (re.compile(r"executor://[0-9a-f-]{36}/xunit\.v3/"), ("Output", "StdOut")),
 )
 WORKFLOW_REF = re.compile(r"([^/]+/[^/]+)/(\.github/workflows/[^@]+)@(.+)\Z")
+# WHY: An MSBuild configuration name as dotnet pack --configuration takes it; anything else could inject properties.
+CONFIGURATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 
 
 class QualificationError(RuntimeError):
@@ -175,9 +178,12 @@ def test_projects(root: Path) -> dict[str, str]:
     return result
 
 
-def evaluate(root: Path, project: Path, names: list[str]) -> dict[str, str]:
-    """Return MSBuild-evaluated properties of a restored project."""
-    command = ["dotnet", "msbuild", str(project), "-nologo", *(f"-getProperty:{name}" for name in names)]
+def evaluate(root: Path, project: Path, names: list[str], settings: dict[str, str] | None = None) -> dict[str, str]:
+    """Return MSBuild-evaluated properties of a restored project, optionally with global properties set."""
+    from tools.release_lines.package_validation import property_arguments
+
+    command = ["dotnet", "msbuild", str(project), "-nologo", *(f"-getProperty:{name}" for name in names),
+               *property_arguments(settings or {})]
     # WHY: The CLI "looks for a global.json file iteratively navigating the path upward from the current working
     # directory"; the job runs in the checkout of this repository, whose global.json pins another SDK.
     # https://learn.microsoft.com/dotnet/core/tools/global-json
@@ -193,14 +199,34 @@ def evaluate(root: Path, project: Path, names: list[str]) -> dict[str, str]:
     return properties
 
 
-def require_package_validation(root: Path, package_ids: list[str]) -> list[dict]:
-    """Require one packable project per release package, each with package validation enabled."""
+def require_package_validation(root: Path, package_ids: list[str], *, package_dir: Path, version: str,
+                               configuration: str, work: Path, run=subprocess.run, fetcher=None,
+                               verifier=None) -> list[dict]:
+    """Require each release package to come from a project that validates it, and validate its exact archive."""
     # WHY: "EnablePackageValidation runs a series of checks after the Pack task"; MySql, SafeMigrations and
-    # NestedSet enable it for every shipped project. A baseline version stays the repository's choice (only NestedSet
-    # sets one). https://learn.microsoft.com/dotnet/fundamentals/apicompat/package-validation/overview
+    # NestedSet enable it for every shipped project, and only NestedSet sets a baseline version. The property is
+    # read in the pack's configuration and version, because a project can set it for one configuration only.
+    # https://learn.microsoft.com/dotnet/fundamentals/apicompat/package-validation/overview
+    # WHY: Microsoft offers the same validation "as an MSBuild task or using the Microsoft.DotNet.ApiCompat.Tool
+    # global tool"; the tool checks the archive the candidate ships, independent of how the pack job ran.
+    # https://learn.microsoft.com/dotnet/fundamentals/apicompat/global-tool
+    from tools.release_lines import package_validation as validation
+    from tools.release_publication import nuget, packages
+
+    fetcher = fetcher or nuget.fetch
+    verifier = verifier or nuget.verify_signature
+    if not CONFIGURATION.fullmatch(configuration):
+        raise QualificationError("The pack configuration must be an MSBuild configuration name.")
+
+    policies.parse_version(version)
+    settings = {"Configuration": configuration, "Version": version, "PackageVersion": version}
+    expected = {f"{name}.{version}.nupkg" for name in package_ids}
+    if {path.name for path in package_dir.glob("*.nupkg")} != expected:
+        raise QualificationError("The package artifact does not hold exactly the release packages of this version.")
+
     found = {}
     for project in source_projects(root):
-        properties = evaluate(root, project, ["PackageId", "IsPackable", "EnablePackageValidation"])
+        properties = evaluate(root, project, ["PackageId", "IsPackable", "EnablePackageValidation"], settings)
         if properties.get("IsPackable", "").lower() != "true" or properties.get("PackageId") not in package_ids:
             continue
 
@@ -209,15 +235,50 @@ def require_package_validation(root: Path, package_ids: list[str]) -> list[dict]
 
         if properties.get("EnablePackageValidation", "").lower() != "true":
             raise QualificationError(f"{project.relative_to(root)} packs {properties['PackageId']} without "
-                                     "EnablePackageValidation.")
+                                     f"EnablePackageValidation in {configuration}.")
 
-        found[properties["PackageId"]] = project.relative_to(root).as_posix()
+        found[properties["PackageId"]] = project
 
     missing = sorted(set(package_ids) - set(found))
     if missing:
         raise QualificationError(f"No packable project produces {', '.join(missing)}.")
 
-    return [{"package": name, "project": path} for name, path in sorted(found.items())]
+    try:
+        tool = validation.install_tool(root, work / "tool", run=run, fetcher=fetcher, verifier=verifier)
+        result = []
+        for name, project in sorted(found.items()):
+            # WHY: The SDK validates with the references of each inner build, which exist only after a build; the
+            # pack builds the same way before it validates. --no-restore keeps the locked graph restored above.
+            # https://learn.microsoft.com/dotnet/core/tools/dotnet-build
+            completed = run(["dotnet", "build", str(project), "--no-restore",
+                             *validation.property_arguments(settings)], cwd=root, check=False)
+            if completed.returncode:
+                raise QualificationError(f"Cannot build {project.relative_to(root)} in {configuration}.")
+
+            package = package_dir / f"{name}.{version}.nupkg"
+            if package.is_symlink() or not package.is_file():
+                raise QualificationError(f"The release package {package.name} must be a regular file.")
+
+            digest = packages.sha256(package)
+            state = validation.collect(root, project, settings, run=run)
+            references = validation.references(root, project, settings, state, run=run)
+            baseline = validation.baseline(state, work / "baseline" / name, root, fetcher=fetcher, verifier=verifier)
+            # WHY: The tool targets net8.0 with rollForward Major and so starts on the lowest major runtime from 8 on,
+            # while the SDK's Roslyn that the pack used, which CollectApiCompatInputs names, needs the SDK's own
+            # runtime. DOTNET_ROLL_FORWARD overrides runtimeconfig.json; LatestMajor picks the highest installed one.
+            # https://learn.microsoft.com/dotnet/core/versions/selection
+            completed = run([str(tool), *validation.tool_arguments(state, package, references, baseline)],
+                            cwd=root, check=False, env={**os.environ, "DOTNET_ROLL_FORWARD": "LatestMajor"})
+            if completed.returncode or packages.sha256(package) != digest:
+                raise QualificationError(f"Package validation of {package.name} failed.")
+
+            result.append({"package": name, "project": project.relative_to(root).as_posix(),
+                           "configuration": configuration, "nupkg": package.name, "sha256": digest,
+                           "baselineVersion": state["properties"].get("PackageValidationBaselineVersion") or None})
+    except validation.PackageValidationError as error:
+        raise QualificationError(str(error)) from error
+
+    return result
 
 
 def read_trx(path: Path) -> list[dict]:
@@ -394,7 +455,8 @@ def protected_gates(root: Path, repository: str, tree: str, source_ref: str, pol
 
 
 def qualify(api, environment: dict, root: Path, *, version: str, qualification_only: bool, trx_dir: Path,
-            output: Path, verify=attestation.verify) -> dict:
+            output: Path, package_dir: Path, pack_configuration: str = "Release", verify=attestation.verify,
+            run=subprocess.run, fetcher=None, verifier=None) -> dict:
     """Qualify the checked-out candidate and write the subject and both predicates; return a summary."""
     repository = environment.get("GITHUB_REPOSITORY", "")
     source_ref = environment.get("GITHUB_REF", "")
@@ -424,7 +486,10 @@ def qualify(api, environment: dict, root: Path, *, version: str, qualification_o
 
     skips = {item["project"] for item in policy["qualification"]["testResults"]["skips"]}
     tests = check_tests(sorted(trx_dir.rglob("*.trx")), test_projects(root), skips)
-    validated = require_package_validation(root, policy["release"]["packages"])
+    with tempfile.TemporaryDirectory(prefix="package-validation-") as work:
+        validated = require_package_validation(root, policy["release"]["packages"], package_dir=package_dir,
+                                               version=version, configuration=pack_configuration, work=Path(work),
+                                               run=run, fetcher=fetcher, verifier=verifier)
     attestation.write_predicate(output / "snapshot.json", snapshot)
     attestation.write_predicate(output / "qualification.json", {
         "schemaVersion": 1, "repository": repository, "sourceRef": source_ref, "commit": commit, "tree": tree,

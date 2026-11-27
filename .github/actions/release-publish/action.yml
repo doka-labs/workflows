@@ -31,6 +31,16 @@ inputs:
 runs:
   using: composite
   steps:
+    # WHY: Verification rejects self-hosted attestations, including this job's admission before the NuGet push.
+    # https://cli.github.com/manual/gh_attestation_verify
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context
+    - name: Require a GitHub-hosted runner
+      if: runner.environment != 'github-hosted'
+      shell: bash
+      run: |
+        echo '::error::Release publication requires a GitHub-hosted runner.'
+        exit 1
+
     # WHY: The action's directory lies in a copy of this whole repository at the called ref (actions/runner
     # ActionManager: <actions>/<owner>/<repo>/<ref>/<path>), so the tools come from the same commit as the action.
     # They run as a package with -E -s from that root: -I would also drop the working directory, which "python -m"
@@ -130,8 +140,11 @@ runs:
     # accepts the same candidate bytes again and replaces the available one with them.
     # https://learn.microsoft.com/dotnet/core/tools/dotnet-nuget-push
     # https://github.com/NuGet/NuGetGallery/blob/main/src/NuGetGallery/Services/SymbolPackageUploadService.cs
+    # WHY: The product's global.json selects the SDK from the current working directory.
+    # https://learn.microsoft.com/dotnet/core/tools/global-json
     - name: Push the pending packages, then every symbol package
       shell: bash
+      working-directory: repository
       env:
         NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
       run: |

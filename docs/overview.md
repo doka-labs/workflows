@@ -317,7 +317,7 @@ flowchart TB
   q5 -- yes --> q6["those jobs of this run succeeded"]
   q5 -- no --> q7
   q6 --> q7["TRX of every test project, VSTest or<br/>Microsoft Testing Platform: no failure,<br/>no duplicate, skips only where the policy<br/>accepts them and with a reason"]
-  q7 --> q8["every release package has one packable project<br/>with EnablePackageValidation=true"]
+  q7 --> q8["every release package has one packable project with<br/>EnablePackageValidation=true in the pack configuration;<br/>apicompat validates its exact archive, with the baseline"]
   q8 --> q9[("attest release-line-snapshot-v1<br/>and release-qualification-v1, subject: tree")]
 ```
 

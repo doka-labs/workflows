@@ -18,7 +18,7 @@ on:
         type: boolean
         default: true
       runs-on:
-        description: Runner label for the check job.
+        description: Linux runner label with Docker installed.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -37,6 +37,15 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # WHY: The checker container mounts the checkout and the package folder at their host paths.
+      # https://docs.docker.com/engine/storage/bind-mounts/
+      - name: Require a Linux runner
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          echo '::error::Architecture Document requires a Linux runner.'
+          exit 1
+
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

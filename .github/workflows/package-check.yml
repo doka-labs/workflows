@@ -21,7 +21,7 @@ on:
         type: string
         default: Doka Labs
       runs-on:
-        description: Runner label for the package job.
+        description: Linux x64 runner label for the package job.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -43,6 +43,15 @@ jobs:
     timeout-minutes: 20
 
     steps:
+      # WHY: The pinned SBOM binary targets Linux x64. Fail before building or downloading package artifacts.
+      # https://github.com/microsoft/sbom-tool/releases/tag/v4.1.5
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context
+      - name: Require a Linux x64 runner
+        if: runner.os != 'Linux' || runner.arch != 'X64'
+        run: |
+          echo '::error::Package Check requires a Linux x64 runner.'
+          exit 1
+
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -83,9 +92,12 @@ jobs:
           echo "$SHA256  $RUNNER_TEMP/sbom-tool/sbom-tool" | sha256sum --check --strict
           chmod 0755 "$RUNNER_TEMP/sbom-tool/sbom-tool"
 
+      # WHY: The dotnet CLI resolves global.json from its working directory, so run from the product checkout
+      # and pass the shared tool by absolute path. https://learn.microsoft.com/dotnet/core/tools/global-json
       - name: Verify the Portable PDBs and derive symbol probes
+        working-directory: repository
         run: >-
-          dotnet run --project .workflows/tools/NuGetSymbols/NuGetSymbols.csproj --configuration Release --
+          dotnet run --project "$GITHUB_WORKSPACE/.workflows/tools/NuGetSymbols/NuGetSymbols.csproj" --configuration Release --
           --packages "$RUNNER_TEMP/packages" --output "$RUNNER_TEMP/symbol-probes.json"
 
       # WHY: Component detection and NuGet write scratch files to TMPDIR, and the self-contained binary may extract

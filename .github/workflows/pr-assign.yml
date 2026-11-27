@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       runs-on:
-        description: Runner label for the assign job.
+        description: Runner label with Bash and GitHub CLI installed.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -35,18 +35,25 @@ jobs:
     timeout-minutes: 5
 
     steps:
-      # WHY: "Only users with push access can add assignees to an issue. Assignees are silently ignored otherwise",
-      # so the author is checked first and a user who cannot be assigned gets a notice instead of a red run.
-      # The endpoint adds assignees and does not replace existing ones. https://docs.github.com/en/rest/issues/assignees
+      # WHY: The eligibility check reports 204 for an assignable user and 404 otherwise. Keep other failures
+      # visible, including transport errors with no HTTP status. The POST adds to existing assignees.
+      # https://docs.github.com/en/rest/issues/assignees#check-if-a-user-can-be-assigned
+      # https://cli.github.com/manual/gh_api
       - name: Assign the author
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          if ! gh api "repos/$GITHUB_REPOSITORY/assignees/$AUTHOR" --silent 2>/dev/null; then
-            echo "::notice::$AUTHOR cannot be assigned in $GITHUB_REPOSITORY."
-            exit 0
+          if ! response=$(gh api "repos/$GITHUB_REPOSITORY/assignees/$AUTHOR" --include 2>/dev/null); then
+            status=${response%%$'\n'*}
+            if [[ "$status" =~ ^HTTP/[0-9.]+[[:space:]]+404([[:space:]]|$) ]]; then
+              echo "::notice::$AUTHOR cannot be assigned in $GITHUB_REPOSITORY."
+              exit 0
+            fi
+            echo "::error::Could not check whether $AUTHOR can be assigned in $GITHUB_REPOSITORY."
+            exit 1
           fi
           gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$NUMBER/assignees" -f "assignees[]=$AUTHOR" --silent
           echo "Assigned $AUTHOR to pull request #$NUMBER."

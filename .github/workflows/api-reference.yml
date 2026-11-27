@@ -2,8 +2,8 @@ name: API Reference
 
 # Builds the API reference of the shipped packages and the documents under
 # docs/ with DocFX from the released tag, and publishes the site on the
-# repository's GitHub Pages. A stable release always replaces the site; a
-# pre-release replaces it only while no stable release exists. The site is
+# repository's GitHub Pages. The highest stable release replaces the site;
+# before the first stable release the highest pre-release does. The site is
 # built for every release, so a broken document fails the run even when the
 # site is kept.
 
@@ -14,8 +14,12 @@ on:
         description: Released tag, v<version>.
         type: string
         required: true
+      pack-configuration:
+        description: MSBuild configuration in which the packages were packed.
+        type: string
+        default: Release
       runs-on:
-        description: Runner label for the build job.
+        description: Linux x64 runner label for the DocFX build and the Pages deploy job.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -36,10 +40,20 @@ jobs:
       deploy: ${{ steps.decide.outputs.deploy }}
 
     steps:
+      # WHY: The pinned DocFX archive contains a Linux x64 executable.
+      # https://github.com/dotnet/docfx/releases/tag/v2.81.0
+      - name: Require a Linux x64 runner
+        if: runner.os != 'Linux' || runner.arch != 'X64'
+        run: |
+          echo '::error::API reference requires a Linux x64 runner.'
+          exit 1
+
+      # WHY: An unqualified name can select a same-named branch before the tag. The immutable release names a tag.
+      # https://github.com/actions/checkout/blob/3d3c42e5aac5ba805825da76410c181273ba90b1/src/ref-helper.ts#L44-L58
       - name: Check out the released tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
           path: repository
 
@@ -102,17 +116,25 @@ jobs:
         working-directory: .workflows
         env:
           TAG: ${{ inputs.tag }}
+          PACK_CONFIGURATION: ${{ inputs.pack-configuration }}
         run: >-
           python3 -E -s -m tools.api_reference generate --root "$GITHUB_WORKSPACE/repository"
           --title "${GITHUB_REPOSITORY#*/}" --repository "$GITHUB_REPOSITORY" --tag "$TAG"
+          --pack-configuration "$PACK_CONFIGURATION"
 
+      # WHY: DocFX evaluates the projects with the pack's configuration and the tag's version, so the restore uses
+      # the same properties; a dependency that depends on them would otherwise resolve differently.
+      # https://learn.microsoft.com/visualstudio/msbuild/msbuild-conditions
       - name: Restore the shipped projects
         working-directory: repository
         env:
           PROJECTS: ${{ steps.generate.outputs.projects }}
+          PACK_CONFIGURATION: ${{ inputs.pack-configuration }}
+          TAG: ${{ inputs.tag }}
         run: |
           for project in $PROJECTS; do
-            dotnet restore "$project" -p:ContinuousIntegrationBuild=true
+            dotnet restore "$project" -p:ContinuousIntegrationBuild=true "-p:Configuration=$PACK_CONFIGURATION" \
+              "-p:Version=${TAG#v}" "-p:PackageVersion=${TAG#v}"
           done
 
       # WHY: Warnings fail the build, so a missing XML comment or a broken link never reaches the published site.
@@ -130,22 +152,50 @@ jobs:
     name: Deploy
     needs: build
     if: needs.build.outputs.deploy == 'true'
-    # WHY: Deploying to Pages needs pages write and an OIDC token, in the github-pages environment.
+    # WHY: Deploying to Pages needs pages write and an OIDC token, in the github-pages environment. Contents read
+    # lets the job check out the pinned site tools and read the release list before deploying.
     # https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages
+    # https://docs.github.com/en/rest/releases/releases#list-releases
     permissions:
+      contents: read
       pages: write
       id-token: write
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: 15
-    # WHY: Two releases deploy one after the other; neither cancels a running deployment.
+    # WHY: Only one deployment runs at a time. queue: max keeps a waiting highest release from being replaced by
+    # a lower one that finished building later. Neither supersedes a running deployment.
+    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
     concurrency:
       group: ${{ github.repository }}-pages
       cancel-in-progress: false
+      queue: max
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
+      # WHY: The final decision uses the trusted tools at the reusable workflow's commit, as the build did.
+      # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
+      - name: Check out the site tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .workflows
+          persist-credentials: false
+
+      # WHY: The build's decision can grow stale while building or waiting in the queue. Sample the release list
+      # while the Pages lock is held, immediately before using the artifact from this run.
+      # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+      - name: Recheck which release replaces the site
+        id: decide
+        working-directory: .workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: python3 -E -s -m tools.api_reference should-deploy --repository "$GITHUB_REPOSITORY" --version "${TAG#v}"
+
       - name: Deploy the site
+        if: steps.decide.outputs.deploy == 'true'
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

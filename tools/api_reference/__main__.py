@@ -46,13 +46,15 @@ def main(argv: list[str] | None = None) -> int:
     generate.add_argument("--title", required=True)
     generate.add_argument("--repository", required=True, help="owner/name; links to other files go to its GitHub.")
     generate.add_argument("--tag", required=True, help="Released tag v<version>; links to other files name it.")
+    generate.add_argument("--pack-configuration", default="Release", help="MSBuild configuration of the pack.")
     deploy = commands.add_parser("should-deploy", help="Decide whether the release replaces the published site.")
     deploy.add_argument("--repository", required=True)
     deploy.add_argument("--version", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
-            result = site.write(args.root.resolve(), args.title, args.repository, args.tag)
+            result = site.write(args.root.resolve(), args.title, args.repository, args.tag,
+                                configuration=args.pack_configuration)
             _output("projects", " ".join(result["projects"]))
             print(f"Site for {', '.join(result['projects'])}; sections: {', '.join(result['sections'])}.")
             return 0

@@ -21,8 +21,16 @@ on:
         description: Name pattern of this run's artifacts that hold the TRX test results.
         type: string
         required: true
+      packages-artifact:
+        description: Name of this run's artifact that holds the packed release archives.
+        type: string
+        default: packages
+      pack-configuration:
+        description: MSBuild configuration in which the archives were packed.
+        type: string
+        default: Release
       runs-on:
-        description: Runner label for the qualification job.
+        description: GitHub-hosted Linux runner label for the qualification job.
         type: string
         # WHY: The newest generally available GitHub-hosted Ubuntu image.
         # https://github.com/actions/runner-images/issues/14747
@@ -53,6 +61,14 @@ jobs:
       tree: ${{ steps.qualify.outputs.tree }}
 
     steps:
+      # WHY: Release verification denies attestations signed on self-hosted runners. Use the same runner contract
+      # here as for PR qualification and release candidates. https://cli.github.com/manual/gh_attestation_verify
+      - name: Require a GitHub-hosted Linux runner
+        if: runner.environment != 'github-hosted' || runner.os != 'Linux'
+        run: |
+          echo '::error::Release qualification requires a GitHub-hosted Linux runner.'
+          exit 1
+
       # WHY: A documentation-only pull request qualification is traced back through earlier trees to a full one,
       # and each step is recomputed with git diff, which needs those trees. fetch-depth 0 "indicates all history for
       # all branches and tags". https://github.com/actions/checkout/blob/v7.0.1/action.yml
@@ -94,6 +110,15 @@ jobs:
           pattern: ${{ inputs.test-results-pattern }}
           path: ${{ runner.temp }}/test-results
 
+      # WHY: Package validation runs on the archives the candidate ships, from the same artifact the candidate job
+      # downloads; qualification-only runs pack them as well.
+      # https://learn.microsoft.com/dotnet/fundamentals/apicompat/global-tool
+      - name: Download this run's packed archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.packages-artifact }}
+          path: ${{ runner.temp }}/packages
+
       - name: Qualify the candidate
         id: qualify
         working-directory: .workflows
@@ -101,10 +126,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           QUALIFICATION_ONLY: ${{ inputs.qualification-only }}
+          PACK_CONFIGURATION: ${{ inputs.pack-configuration }}
         run: >-
           python3 -E -s -m tools.release_lines qualify --root "$GITHUB_WORKSPACE/repository"
           --version "$VERSION" --qualification-only "$QUALIFICATION_ONLY"
           --trx "$RUNNER_TEMP/test-results" --output "$RUNNER_TEMP/qualification"
+          --packages "$RUNNER_TEMP/packages" --pack-configuration "$PACK_CONFIGURATION"
 
       - name: Attest the release-line snapshot
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2

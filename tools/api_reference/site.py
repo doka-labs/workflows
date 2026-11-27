@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path, PurePosixPath
 
 from tools.api_reference import links
@@ -29,9 +30,10 @@ TABLE_RULE = re.compile(r"^\|\s*:?-{3,}:?\s*\|\s*:?-{3,}:?\s*\|\s*$")
 # WHY: The site is built from copies in one directory of its own, so the checkout keeps its relative links for
 # madr-check and as-built, and no generated file can collide with a file of the repository.
 STAGE = ".docfx"
-PACKAGE_ID = re.compile(r"<PackageId>\s*([^<\s]+)\s*</PackageId>")
 # WHY: Both values become part of every GitHub link of the site; anything but owner/name and a release tag would
 # build links to somewhere else.
+# WHY: An MSBuild configuration name as dotnet pack --configuration takes it; anything else could inject properties.
+CONFIGURATION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$")
 DECISIONS = PurePosixPath("docs/decisions")
@@ -156,13 +158,37 @@ def attach_decisions(root: Path, sections: list[dict]) -> None:
     rows[0]["items"] = decisions(root)
 
 
-def projects(root: Path, packages: list[str]) -> list[str]:
+def pack_settings(tag: str, configuration: str) -> dict[str, str]:
+    """Return the MSBuild properties of the pack that built the tag's packages."""
+    # WHY: PackageId, IsPackable and the public API can depend on the configuration and version. Without a
+    # configuration MSBuild evaluates Debug, while dotnet pack uses Release for current SDKs; the release
+    # qualification evaluates the same properties. "Starting in the .NET 8 SDK, PackRelease defaults to true."
+    # https://learn.microsoft.com/dotnet/core/project-sdk/msbuild-props#packrelease
+    require(TAG.match(tag) is not None, f"'{tag}' is not v<version>.")
+    require(CONFIGURATION.fullmatch(configuration) is not None, f"'{configuration}' is not a configuration name.")
+    return {"Configuration": configuration, "Version": tag[1:], "PackageVersion": tag[1:]}
+
+
+def projects(root: Path, packages: list[str], settings: dict[str, str]) -> list[str]:
     """Return the project file of each shipped package, relative to the root, in the order of the policy."""
+    # WHY: PackageId can be inherited from Directory.Build.props, and IsPackable decides whether a project packs.
+    # MSBuild evaluates both from the checkout, whose global.json selects the product's SDK.
+    # https://learn.microsoft.com/visualstudio/msbuild/customize-by-directory
+    # https://learn.microsoft.com/dotnet/core/tools/global-json
+    root = root.resolve()
     found: dict[str, str] = {}
     for project in sorted((root / "src").glob("*/*.csproj")):
-        declared = PACKAGE_ID.search(project.read_text(encoding="utf-8"))
-        package = declared[1] if declared else project.stem
-        if package in packages:
+        try:
+            command = ["dotnet", "msbuild", str(project), "-nologo", "-getProperty:PackageId,IsPackable",
+                       *(f"-property:{name}={value}" for name, value in settings.items())]
+            completed = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=300, check=True)
+            properties = json.loads(completed.stdout)["Properties"]
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as error:
+            raise SiteError(f"MSBuild cannot evaluate the package identity of "
+                            f"{project.relative_to(root).as_posix()}.") from error
+
+        package = properties.get("PackageId")
+        if package in packages and str(properties.get("IsPackable", "")).lower() == "true":
             require(package not in found, f"Two projects pack {package}.")
             found[package] = project.relative_to(root).as_posix()
 
@@ -215,13 +241,13 @@ def stage_documents(root: Path, stage: Path, repository: str, tag: str) -> None:
         copy.write_text(text, encoding="utf-8")
 
 
-def write(root: Path, title: str, repository: str, tag: str) -> dict:
+def write(root: Path, title: str, repository: str, tag: str, *, configuration: str = "Release") -> dict:
     """Write the site into .docfx/ of the checkout and return the projects to restore."""
     require(REPOSITORY.match(repository) is not None, f"'{repository}' is not owner/name.")
-    require(TAG.match(tag) is not None, f"'{tag}' is not v<version>.")
+    settings = pack_settings(tag, configuration)
     policy = policies.load_policy(root)
     packages = list(policy["release"]["packages"])
-    files = projects(root, packages)
+    files = projects(root, packages, settings)
     sections = navigation(root)
     attach_decisions(root, sections)
     require((root / "README.md").is_file(), "README.md is missing.")
@@ -232,7 +258,7 @@ def write(root: Path, title: str, repository: str, tag: str) -> dict:
     # WHY: DocFX resolves every relative path of docfx.json from its own directory; the projects lie in the checkout
     # one level above the stage. https://dotnet.github.io/docfx/reference/docfx-json-reference.html
     config = {
-        "metadata": [{"src": [{"src": "..", "files": files}], "dest": "api"}],
+        "metadata": [{"src": [{"src": "..", "files": files}], "dest": "api", "properties": settings}],
         "build": {
             "content": [{"files": ["api/**.yml", "api/index.md", "toc.yml", "index.md", "docs/**/*.md"]}],
             "resource": [{"files": ["docs/**/*.png", "docs/**/*.svg"]}],

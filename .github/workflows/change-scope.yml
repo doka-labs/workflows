@@ -41,25 +41,23 @@ jobs:
           persist-credentials: false
           path: repository
 
-      # WHY: Checkout removes its credentials, and GitHub "may temporarily require authentication for some clones
-      # and fetches of public repositories over HTTPS"; NestedSet's publication failed with HTTP 403 on such a read
-      # (run 44952104737). The helper lends the job token to Git without storing it.
-      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
-      - name: Authenticate Git reads with the job token
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh auth setup-git --hostname github.com
-
       # WHY: For pull_request, the checkout is "the merge commit on the merge branch"; its difference to the base
-      # is exactly what the pull request changes. The shallow checkout holds only the merge commit.
+      # is exactly what the pull request changes. The shallow checkout holds only the merge commit. Checkout removes
+      # its credentials, and GitHub "may temporarily require authentication for some clones and fetches of public
+      # repositories over HTTPS" (HTTP 403 in NestedSet run 44952104737); the helper that gh configures reads
+      # GH_TOKEN when Git invokes it, so both run in the step that fetches.
       # https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+      # https://github.blog/changelog/2026-10-19-some-git-over-https-may-temporarily-require-authentication
+      # https://cli.github.com/manual/gh_auth_setup-git
       - name: Fetch the pull request base
         if: github.event_name == 'pull_request'
         working-directory: repository
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: git fetch --no-tags --depth=1 origin "$BASE_SHA"
+        run: |
+          gh auth setup-git --hostname github.com
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
 
       # WHY: The tool comes from the same commit as this workflow, not from a branch head.
       - name: Check out the change-scope tool

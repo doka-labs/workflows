@@ -12,9 +12,22 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
-## [0.5.2] - 2026-11-27
+## [0.6.0] - 2026-11-27
+
+### Added
+
+- `release-qualification.yml` validates the exact release archives with
+  `Microsoft.DotNet.ApiCompat.Tool` of the checkout's SDK version, with the
+  settings the pack would use and the baseline from nuget.org, and records
+  each archive with its SHA-256. New optional inputs: `packages-artifact`
+  (default `packages`) and `pack-configuration` (default `Release`). A new
+  candidate must match the recorded archives; candidates qualified before
+  stay publishable.
 
 ### Fixed
+
+- The qualification reads `EnablePackageValidation` in the pack
+  configuration and version instead of the project's default configuration.
 
 - `api-reference.yml` deploys the site only when the tag's release is
   published and immutable. A publish job whose NuGet readback is still
@@ -33,6 +46,32 @@ entries stay under Unreleased.
   what nuget.org does: it refuses a symbol package with 409 only while one
   of that version validates, and otherwise replaces the available one with
   the same bytes.
+- `change-scope.yml`, `release-pr-attestation.yml`, the tag check of
+  `release-candidate.yml` and `release.yml` configure the GitHub CLI
+  credential helper in the step that reads with Git and give that step
+  `GH_TOKEN`. Before, the helper was configured in a step of its own while
+  the reading step had no token, or the reading step had a token and no
+  helper.
+- `api-reference.yml` checks out `refs/tags/<tag>`, so a branch of the same
+  name can no longer replace the released source. Its deploy job checks
+  again under the Pages lock whether the release replaces the site, and
+  waiting deployments queue instead of replacing each other.
+- `api-reference.yml` selects the project of a package by its
+  MSBuild-evaluated `PackageId` and `IsPackable`, so a `PackageId` from
+  `Directory.Build.props` is found. Selection, restore and the DocFX
+  metadata use the pack's configuration and the tag's version; the new
+  optional input `pack-configuration` defaults to `Release`.
+- The symbol check of `release-candidate.yml` and `package-check.yml` and
+  the NuGet push of `release-publish` run from the product checkout, so its
+  `global.json` selects the SDK.
+- The coverage gate joins a report's file names with its source root and
+  removes only an explicit checkout prefix; two files of the same name in
+  different directories are no longer merged. The new optional input
+  `source-checkout-roots` names checkouts of other report jobs.
+- `pr-assign.yml` treats only HTTP 404 as an author who cannot be assigned;
+  other API and transport failures fail the job.
+- Jobs whose pinned tools need Linux x64, or whose attestations must come from
+  a GitHub-hosted runner, fail with a clear message on any other runner.
 
 ## [0.5.1] - 2026-11-26
 
