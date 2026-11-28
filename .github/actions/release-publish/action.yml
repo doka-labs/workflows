@@ -165,9 +165,18 @@ runs:
           dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" --no-symbols --skip-duplicate --timeout 300
         done < "$RUNNER_TEMP/pending.txt"
+        # The symbol list was made before the pushes; another attempt can have delivered a symbol package since, and
+        # nuget.org would replace it, so each one is asked again right before its push.
         while IFS= read -r package; do
           [ -n "$package" ] || continue
           recheck
+          pending="$(cd "$TOOLS" && python3 -E -s -m tools.release_publication symbol-pending \
+            --candidate "$RUNNER_TEMP/candidate" --package "$package")"
+          if [ "$pending" != true ]; then
+            echo "The symbol server serves $package now; it is not pushed."
+            continue
+          fi
+
           dotnet nuget push "$RUNNER_TEMP/candidate/$package" --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" --skip-duplicate --timeout 300
         done < "$RUNNER_TEMP/symbols.txt"

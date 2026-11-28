@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -55,7 +56,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "generate":
             result = site.write(args.root.resolve(), args.title, args.repository, args.tag,
                                 configuration=args.pack_configuration)
-            _output("projects", " ".join(result["projects"]))
+            # WHY: A JSON array keeps a project path with spaces whole; the workflow reads it with jq instead of
+            # splitting words. https://www.gnu.org/software/bash/manual/html_node/Word-Splitting.html
+            _output("projects", json.dumps(result["projects"]))
             print(f"Site for {', '.join(result['projects'])}; sections: {', '.join(result['sections'])}.")
             return 0
 

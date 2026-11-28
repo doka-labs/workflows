@@ -99,6 +99,28 @@ class WorkflowExecutionContractTests(unittest.TestCase):
             self.assertIn("if: steps.pending.outputs.push == 'true'", step)
         for loop in push.split("done < ")[:2]:
             self.assertLess(loop.rindex("recheck"), loop.index("dotnet nuget push"))
+        symbol_loop = push.split("done < ")[1]
+        self.assertLess(symbol_loop.index("symbol-pending"), symbol_loop.index("dotnet nuget push"))
+
+    def test_stage_and_sbom_jobs_read_the_attested_candidate_of_its_attempt(self):
+        # Arrange
+        workflow = (WORKFLOWS / "release-candidate.yml").read_text(encoding="utf-8")
+
+        # Act
+        jobs = dict(re.findall(r"^  ([a-z-]+):\n((?:^(?:    .*|[ \t]*)\n)*)", workflow, flags=re.MULTILINE))
+        candidate, stage, sbom, tag_check = jobs["candidate"], jobs["stage"], jobs["sbom"], jobs["tag-check"]
+
+        # Assert
+        self.assertNotIn("contents: write", candidate)
+        self.assertNotIn("tools.release_publication stage", candidate)
+        self.assertIn('echo "name=release-candidate-$VERSION-attempt-$ATTEMPT" >> "$GITHUB_OUTPUT"', candidate)
+        self.assertIn("artifact: ${{ steps.artifact.outputs.name }}", candidate)
+        for job in (stage, sbom):
+            self.assertIn("name: ${{ needs.candidate.outputs.artifact }}", job)
+        self.assertIn("contents: write", stage)
+        self.assertIn("group: ${{ github.repository }}-candidate-${{ inputs.version }}", stage)
+        self.assertLess(stage.index("assemble-candidate --handoff"), stage.index("tools.release_publication stage"))
+        self.assertIn("needs: [candidate, stage, sbom]", tag_check)
 
     def test_unsupported_runners_fail_before_checkout(self):
         # Arrange

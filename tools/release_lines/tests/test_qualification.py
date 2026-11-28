@@ -371,6 +371,45 @@ class PackageValidationTests(unittest.TestCase):
         tool = next(call for call in self.calls if call[0].endswith("apicompat"))
         self.assertEqual(["package", str(self.packages / "Doka.Core.1.2.3.nupkg")], tool[1:3])
 
+    def test_build_uses_a_locked_restore_with_its_own_properties(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"}}
+
+        # Act
+        self.check(evaluated, ["Doka.Core"])
+
+        # Assert
+        dotnet = [call for call in self.calls if call[:2] in (["dotnet", "restore"], ["dotnet", "build"])]
+        restore, build = dotnet
+        self.assertEqual((["dotnet", "restore"], ["dotnet", "build"]), (restore[:2], build[:2]))
+        self.assertIn("--locked-mode", restore)
+        properties = [argument for argument in build if argument.startswith("-property:")]
+        self.assertEqual(properties, [argument for argument in restore if argument.startswith("-property:")])
+
+    def test_failing_restore_stops_before_the_build(self):
+        # Arrange
+        evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "true"}}
+        original = self.run_fake
+
+        def failing_restore(command, **options):
+            from types import SimpleNamespace
+
+            if command[:2] == ["dotnet", "restore"]:
+                self.calls.append(command)
+                return SimpleNamespace(returncode=1, stdout="")
+
+            return original(command, **options)
+
+        self.run_fake = failing_restore
+
+        # Act
+        with self.assertRaises(qualification.QualificationError) as raised:
+            self.check(evaluated, ["Doka.Core"])
+
+        # Assert
+        self.assertIn("Cannot restore src/Core/Core.csproj in Release in locked mode", str(raised.exception))
+        self.assertFalse(any(call[:2] == ["dotnet", "build"] for call in self.calls))
+
     def test_package_without_validation_in_the_pack_configuration_fails(self):
         # Arrange
         evaluated = {"Core": {"PackageId": "Doka.Core", "IsPackable": "true", "EnablePackageValidation": "false"}}
@@ -546,6 +585,7 @@ class AttestationTests(unittest.TestCase):
             self.assertIn("--signer-workflow", command)
             self.assertEqual(attestation.SIGNERS[attestation.PR_QUALIFICATION],
                              command[command.index("--signer-workflow") + 1])
+            self.assertEqual("1000", command[command.index("--limit") + 1])
             return type("Completed", (), {"returncode": 0, "stdout": output})()
 
         # Act

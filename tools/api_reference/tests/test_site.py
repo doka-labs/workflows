@@ -2,6 +2,7 @@ import json
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from tools.api_reference import __main__ as cli
@@ -545,6 +546,41 @@ class DeployWorkflowTests(unittest.TestCase):
         self.assertIn("id: decide", decide)
         self.assertIn("tools.api_reference should-deploy", decide)
         self.assertIn("if: steps.decide.outputs.deploy == 'true'", use_artifact)
+
+    def test_projects_are_read_whole_and_each_attempt_deploys_its_own_artifact(self):
+        # Arrange
+        workflow = EXAMPLE.parents[1] / ".github" / "workflows" / "api-reference.yml"
+
+        # Act
+        build, deploy = workflow.read_text(encoding="utf-8").split("\n  deploy:\n", 1)
+        restore = build.split("      - name: Restore the shipped projects\n", 1)[1].split("      - name:", 1)[0]
+        upload = build.split("      - name: Upload the site\n", 1)[1]
+
+        # Assert
+        self.assertIn("jq -r '.[]' <<<\"$PROJECTS\"", restore)
+        self.assertNotIn("$PROJECTS; do", restore)
+        self.assertIn("artifact: ${{ steps.artifact.outputs.name }}", build)
+        self.assertIn("echo \"name=github-pages-$ATTEMPT\" >> \"$GITHUB_OUTPUT\"", build)
+        self.assertIn("name: ${{ steps.artifact.outputs.name }}", upload)
+        self.assertIn("artifact_name: ${{ needs.build.outputs.artifact }}", deploy)
+
+
+class GenerateOutputTests(unittest.TestCase):
+    def test_project_paths_with_spaces_stay_whole_in_the_output(self):
+        # Arrange
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        output = directory / "github-output.txt"
+        projects = ["src/My Lib/My Lib.csproj", "src/Other/Other.csproj"]
+
+        # Act
+        with unittest.mock.patch.object(site, "write", lambda *args, **kwargs: {"projects": projects,
+                                                                                 "sections": []}), \
+                unittest.mock.patch.dict("os.environ", {"GITHUB_OUTPUT": str(output)}):
+            cli.main(["generate", "--root", str(directory), "--title", "T", "--repository", "o/r", "--tag", "v1.0.0"])
+
+        # Assert
+        self.assertEqual(projects, json.loads(output.read_text(encoding="ascii").removeprefix("projects=")))
 
 
 class ReleaseListingTests(unittest.TestCase):

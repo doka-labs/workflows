@@ -162,10 +162,15 @@ def draft_asset_problems(repository: str, assets: dict[str, dict], expected: dic
         if asset is None:
             continue
 
-        # WHY: GitHub reports each asset's digest as "sha256:<hex>"; without one the bytes are hashed here.
-        # https://docs.github.com/en/rest/releases/assets
+        # WHY: An asset that is not uploaded, such as a starter asset after an upstream failure, has no bytes to
+        # download, so its state is checked first. GitHub reports each asset's digest as "sha256:<hex>"; without one
+        # the bytes are hashed here. https://docs.github.com/en/rest/releases/assets
+        if asset.get("state") != "uploaded":
+            problems.append(name)
+            continue
+
         actual = asset.get("digest") or f"sha256:{hashlib.sha256(asset_bytes(repository, asset)).hexdigest()}"
-        if asset.get("state") != "uploaded" or actual != f"sha256:{digest}":
+        if actual != f"sha256:{digest}":
             problems.append(name)
 
     return problems
@@ -347,6 +352,28 @@ def extract_sbom(handoff_path: Path, package_id: str, directory: Path) -> Path:
     return path
 
 
+def assemble_candidate(handoff: Path, package_dir: Path, output: Path) -> list[str]:
+    """Rebuild the candidate directory from the text handoff and the packages artifact, byte for byte."""
+    # WHY: The handoff carries only text files, as every upload of this repository does (artifact_uploads); the
+    # packages come from the product's packages artifact, and each file must have the digest the attested
+    # manifest names, so the stage uploads exactly the candidate the candidate job attested.
+    manifest = read_json(handoff / "candidate" / CANDIDATE)
+    output.mkdir(parents=True, exist_ok=True)
+    for name in (CANDIDATE, NOTES, PROBES):
+        (output / name).write_bytes((handoff / "candidate" / name).read_bytes())
+
+    for package in manifest["packages"]:
+        for name in (package["nupkg"], package["snupkg"]):
+            (output / name).write_bytes((package_dir / name).read_bytes())
+
+        extract_sbom(handoff / "sbom-handoff" / "sboms.json", package["id"], output)
+
+    expected = expected_assets(manifest)
+    changed = sorted(name for name, digest in expected.items() if packages.sha256(output / name) != digest)
+    require(not changed, f"The handoff does not hold the attested candidate: {', '.join(changed)}.")
+    return sorted([*expected, CANDIDATE])
+
+
 def expected_assets(manifest: dict) -> dict[str, str]:
     """Return every asset name of the candidate besides the manifest, with its SHA-256.
 
@@ -372,10 +399,23 @@ def require_release_metadata(release: dict, manifest: dict, notes: str) -> None:
             f"The release of {manifest['tag']} has another title, notes or prerelease flag than the candidate.")
 
 
-def stage(api, repository: str, directory: Path) -> dict:
-    """Create the draft if missing and upload only missing assets; never replace one of a complete candidate.
+def await_release(api, repository: str, tag: str, *, attempts: int, sleep) -> dict:
+    """Return the release of the tag once GitHub lists it; fail when it stays invisible for the whole budget."""
+    for attempt in range(attempts):
+        release = release_for(api, repository, tag)
+        if release is not None:
+            return release
 
-    NestedSet's stage.
+        require(attempt + 1 < attempts, f"The new draft of {tag} did not become visible in time.")
+        sleep(10)
+
+    raise PublicationError(f"The new draft of {tag} did not become visible in time.")
+
+
+def stage(api, repository: str, directory: Path, *, attempts: int = 30, sleep=time.sleep) -> dict:
+    """Create the draft if missing and upload only missing assets; never replace an uploaded asset.
+
+    NestedSet's stage with MySql's asset reconciliation and SafeMigrations' wait for a new draft.
     """
     manifest = read_json(directory / CANDIDATE)
     expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
@@ -388,8 +428,10 @@ def stage(api, repository: str, directory: Path) -> dict:
             command.append("--prerelease")
 
         run(command)
-        release = release_for(api, repository, tag)
-        require(release is not None, f"The new draft of {tag} is not visible yet; re-run the job.")
+        # WHY: The release list can lag behind a release that was just created; run 46083572475 of Doka.Tabular
+        # failed because the draft was not listed right after "gh release create". SafeMigrations waits for it
+        # within a fixed budget (wait_for_release_visibility, 30 attempts of 10 seconds) instead of failing.
+        release = await_release(api, repository, tag, attempts=attempts, sleep=sleep)
 
     require(release.get("draft") is True, f"{tag} is already published; it cannot be staged again.")
     require_release_metadata(release, manifest, (directory / NOTES).read_text(encoding="utf-8"))
@@ -397,31 +439,34 @@ def stage(api, repository: str, directory: Path) -> dict:
     unexpected = sorted(set(present) - set(expected))
     require(not unexpected, f"The draft of {tag} has unexpected assets: {', '.join(unexpected)}.")
     uploaded = {name: asset for name, asset in present.items() if asset.get("state") == "uploaded"}
-    # WHY: candidate.json is uploaded last, so its presence marks a complete candidate whose assets are never
-    # replaced (NestedSet's validate_release). Without it the draft holds an unfinished earlier attempt; that attempt
-    # generated its own SBOMs and manifest, because sbom-tool writes a namespace ".../<packageName>/<packageVersion>/
-    # <new-guid>" into every SBOM, so its differing assets are deleted and uploaded again.
+    # WHY: An uploaded asset is never deleted, as in MySql's reconcile_draft_assets. A listing that lags can omit
+    # candidate.json, the last upload, from a complete draft; deleting differing assets then replaced an SBOM of the
+    # complete candidate and left its manifest naming removed bytes. A rerun builds other SBOMs, because sbom-tool
+    # writes a namespace ".../<packageName>/<packageVersion>/<new-guid>" into every SBOM, so an earlier attempt's
+    # differing asset stops the stage; the remedy is a new draft.
     # https://github.com/microsoft/sbom-tool/blob/v4.1.5/README.md
-    committed = CANDIDATE in uploaded
-    stale = set()
     for name, asset in uploaded.items():
         # WHY: GitHub reports each asset's digest as "sha256:<hex>" (NestedSet v10.4.0: candidate.json digest
         # sha256:23dd49fe...); the documentation only names the field ("digest: string or null"). Without a digest
         # the size cannot tell two SBOMs apart, so the bytes are downloaded and hashed, as before publishing.
         # https://docs.github.com/en/rest/releases/assets
-        same = not draft_asset_problems(repository, {name: asset}, {name: expected[name]})
-        if not same:
-            require(not committed, f"The asset {name} of the draft differs from the candidate.")
-            stale.add(name)
+        require(not draft_asset_problems(repository, {name: asset}, {name: expected[name]}),
+                f"The asset {name} of the draft differs from the candidate; delete the draft and start a new run.")
 
     # WHY: "When an upstream failure occurs, you will receive a 502 Bad Gateway status. This may leave an empty asset
-    # with a state of starter. It can be safely deleted." Only such unfinished assets are deleted, and only after
-    # every uploaded asset matched (MySql reconcile_draft_assets). https://docs.github.com/en/rest/releases/assets
-    for name, asset in present.items():
-        if name not in uploaded or name in stale:
-            api.request(f"repos/{repository}/releases/assets/{asset['id']}", "DELETE")
+    # with a state of starter. It can be safely deleted." Only such empty starters are deleted, and only after every
+    # uploaded asset matched; any other state stops the stage (MySql reconcile_draft_assets).
+    # https://docs.github.com/en/rest/releases/assets
+    unfinished = {name: asset for name, asset in present.items() if name not in uploaded}
+    for name, asset in unfinished.items():
+        require(asset.get("state") == "starter" and asset.get("size") == 0,
+                f"The asset {name} of the draft is neither uploaded nor an empty starter; delete the draft and start "
+                "a new run.")
 
-    missing = sorted(set(expected) - (set(uploaded) - stale), key=lambda name: (name == CANDIDATE, name))
+    for asset in unfinished.values():
+        api.request(f"repos/{repository}/releases/assets/{asset['id']}", "DELETE")
+
+    missing = sorted(set(expected) - set(uploaded), key=lambda name: (name == CANDIDATE, name))
     for name in missing:
         require(packages.sha256(directory / name) == expected[name], f"{name} changed before its upload.")
         run(["gh", "release", "upload", tag, str(directory / name), "--repo", repository])
@@ -684,6 +729,26 @@ def latest_flag(api, repository: str, version: str) -> bool:
     return policies.compare_versions(version, tag[1:]) > 0
 
 
+def release_published(api, repository: str, manifest: dict) -> bool:
+    """Return whether the candidate's GitHub release is published, which ends every write to nuget.org."""
+    # WHY: The release is published only after the readback found every package and every Portable PDB on
+    # nuget.org, so a 404 afterwards is the server's, not a missing upload; a run that resumes at a published release
+    # writes nothing to nuget.org. https://learn.microsoft.com/nuget/api/package-base-address-resource
+    release = release_for(api, repository, manifest["tag"])
+    return release is not None and release.get("draft") is False
+
+
+def pending_symbol_packages(api, repository: str, manifest: dict, selected: list[dict], *,
+                            fetcher=nuget.fetch) -> list[dict]:
+    """Return the selected packages whose symbol package still needs a push; none once the release is published."""
+    # WHY: nuget.org would accept a symbol package again and replace the available one.
+    # https://learn.microsoft.com/nuget/api/symbol-package-publish-resource
+    if release_published(api, repository, manifest):
+        return []
+
+    return nuget.pending_symbols(selected, manifest["symbols"], fetcher=fetcher)
+
+
 def check_publish_target(api, repository: str, manifest: dict, directory: Path) -> None:
     """Check the destination before NuGet receives any package."""
     release = release_for(api, repository, manifest["tag"])
@@ -762,6 +827,8 @@ def publish_release(api, repository: str, manifest: dict, directory: Path, *, at
     return release
 
 
+TAG_CHECK_DRAFT_ATTEMPTS = 6
+
 TAG_READINESS_CHECKS = (
     "Changelog section", "Tag unused", "No other tag on the commit", "Version unused on nuget.org",
     "Draft holds this run's candidate", "Draft passes publish verification", "Allowed signers listed",
@@ -769,7 +836,7 @@ TAG_READINESS_CHECKS = (
 
 
 def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=nuget.fetch,
-                  verify=attestation.verify) -> dict:
+                  verify=attestation.verify, sleep=time.sleep) -> dict:
     """Check, in the line's own release run, everything the signed tag needs before it may be created."""
     # WHY: The draft exists only in the run that built it, so its checks run there, with the workflows version the
     # line pins; pre_tag ran the other checks on the maintainer's machine before the run, and they are repeated
@@ -814,6 +881,28 @@ def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=n
         require(not taken, f"{version} is already on nuget.org for {', '.join(taken)}.")
         return ", ".join(names)
 
+    def patiently(action):
+        """Run a draft check again every 10 seconds while it fails, for up to a minute."""
+        # WHY: The check starts about a second after the SBOM jobs attested (Doka.Tabular run 45886213179: SBOM done
+        # 19:52:07, Tag check started 19:52:08) and reads the draft's listing and attestations through the API, while
+        # MySql, SafeMigrations and NestedSet verify against the bundle the attesting job wrote. The whole check is
+        # repeated, not a single lookup, so a lagging listing or an older attestation of the same package found
+        # first cannot end it early; it only reads, so repeating it changes nothing. The job limit of 10 minutes
+        # covers both draft checks.
+        def attempt_all() -> str:
+            for attempt in range(TAG_CHECK_DRAFT_ATTEMPTS):
+                try:
+                    return action()
+                except (PublicationError, GitHubError, ValueError, KeyError):
+                    if attempt + 1 == TAG_CHECK_DRAFT_ATTEMPTS:
+                        raise
+
+                    sleep(10)
+
+            raise PublicationError("The draft check made no attempt.")
+
+        return attempt_all
+
     def draft_candidate() -> str:
         release = release_for(api, repository, tag)
         require(release is not None and release.get("draft") is True, f"No draft release holds a candidate for {tag}.")
@@ -847,9 +936,10 @@ def tag_readiness(api, environment: dict, root: Path, version: str, *, fetcher=n
     check("Tag unused", tag_unused, "Choose the next version.")
     check("No other tag on the commit", no_other_tag, "Release from a commit that carries no version tag.")
     check("Version unused on nuget.org", version_unused, "Choose the next version.")
-    check("Draft holds this run's candidate", draft_candidate, "Re-run the failed candidate jobs of this run.")
-    check("Draft passes publish verification", draft_verified, "Delete the draft and start the candidate again.",
-          "release")
+    check("Draft holds this run's candidate", patiently(draft_candidate),
+          "Re-run this job; if the draft stays incomplete, delete it and start a new run.")
+    check("Draft passes publish verification", patiently(draft_verified),
+          "Delete the draft and start the candidate again.", "release")
     check("Allowed signers listed", signers, f"Add the maintainer's public key to {ALLOWED_SIGNERS} on main.")
     # WHY: A run that reports fewer checks than it performs has not answered the question, whatever it printed.
     require([item["subject"] for item in checks] == list(TAG_READINESS_CHECKS), "The tag check did not complete.")

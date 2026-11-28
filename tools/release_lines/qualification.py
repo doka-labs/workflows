@@ -247,8 +247,18 @@ def require_package_validation(root: Path, package_ids: list[str], *, package_di
         tool = validation.install_tool(root, work / "tool", run=run, fetcher=fetcher, verifier=verifier)
         result = []
         for name, project in sorted(found.items()):
+            # WHY: The build evaluates the project with the pack's configuration and version, so its assets file must
+            # come from a restore with the same properties: a target framework that depends on them otherwise fails
+            # with NETSDK1005 ("Assets file doesn't have a target"). Locked mode keeps the lockfile unchanged.
+            # https://learn.microsoft.com/dotnet/core/tools/sdk-errors/netsdk1005
+            restored = run(["dotnet", "restore", str(project), "--locked-mode", "-p:NuGetAudit=false",
+                            *validation.property_arguments(settings)], cwd=root, check=False)
+            if restored.returncode:
+                raise QualificationError(f"Cannot restore {project.relative_to(root)} in {configuration} in locked "
+                                         "mode.")
+
             # WHY: The SDK validates with the references of each inner build, which exist only after a build; the
-            # pack builds the same way before it validates. --no-restore keeps the locked graph restored above.
+            # pack builds the same way before it validates. --no-restore keeps the graph restored right above.
             # https://learn.microsoft.com/dotnet/core/tools/dotnet-build
             completed = run(["dotnet", "build", str(project), "--no-restore",
                              *validation.property_arguments(settings)], cwd=root, check=False)

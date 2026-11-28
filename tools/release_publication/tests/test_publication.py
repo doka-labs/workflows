@@ -858,6 +858,24 @@ class EnvironmentTests(unittest.TestCase):
         self.assertIn("no required reviewers", str(raised.exception))
 
 
+def listing_uploads(assets, names=None):
+    """Return a fake run that lists each uploaded file as an uploaded asset of the draft, as GitHub does."""
+    def run(command, **kwargs):
+        if command[:3] == ["gh", "release", "upload"]:
+            path = Path(command[4])
+            if names is not None:
+                names.append(path.name)
+
+            assets[:] = [asset for asset in assets if asset["name"] != path.name]
+            assets.append({"id": max([asset["id"] for asset in assets], default=0) + 1, "name": path.name,
+                           "state": "uploaded", "size": path.stat().st_size,
+                           "digest": f"sha256:{packages.sha256(path)}"})
+
+        return ""
+
+    return run
+
+
 class StageTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -874,6 +892,7 @@ class StageTests(unittest.TestCase):
         self.directory.cleanup()
 
     def api(self, assets):
+        publication.run = listing_uploads(assets)
         return FakeApi({f"repos/{REPOSITORY}/releases": [self.release],
                         f"repos/{REPOSITORY}/releases/7/assets": assets})
 
@@ -905,19 +924,22 @@ class StageTests(unittest.TestCase):
         # Assert
         self.assertIn("differs from the candidate", str(raised.exception))
 
-    def test_asset_of_an_unfinished_attempt_is_replaced(self):
+    def test_differing_asset_without_manifest_in_the_listing_fails_and_deletes_nothing(self):
         # Arrange
         name = "Doka.Core.spdx.json"
         assets = [{"id": 1, "name": name, "state": "uploaded", "size": 3, "digest": "sha256:" + "0" * 64}]
         api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
                                 f"repos/{REPOSITORY}/releases/7/assets": assets})
+        uploads = []
+        publication.run = listing_uploads(assets, uploads)
 
         # Act
-        result = publication.stage(api, REPOSITORY, self.root)
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.stage(api, REPOSITORY, self.root)
 
         # Assert
-        self.assertIn(("DELETE", f"repos/{REPOSITORY}/releases/assets/1"), api.calls)
-        self.assertIn(name, result["uploaded"])
+        self.assertIn("delete the draft and start a new run", str(raised.exception))
+        self.assertEqual(([], []), ([call for call in api.calls if call[0] == "DELETE"], uploads))
 
     def test_manifest_is_uploaded_last(self):
         # Arrange
@@ -993,9 +1015,9 @@ class StarterAssetTests(unittest.TestCase):
 
                 return FakeApi.request(inner, route, method, payload)
 
-        api = Api({f"repos/{REPOSITORY}/releases": [self.release],
-                   f"repos/{REPOSITORY}/releases/7/assets": [{"id": 9, "name": name, "state": "starter", "size": 0,
-                                                              "digest": None}]})
+        assets = [{"id": 9, "name": name, "state": "starter", "size": 0, "digest": None}]
+        api = Api({f"repos/{REPOSITORY}/releases": [self.release], f"repos/{REPOSITORY}/releases/7/assets": assets})
+        publication.run = listing_uploads(assets, self.uploads)
 
         # Act
         publication.stage(api, REPOSITORY, self.root)
@@ -1016,6 +1038,166 @@ class StarterAssetTests(unittest.TestCase):
 
         # Assert
         self.assertIn("no unique ID", str(raised.exception))
+
+    def test_unfinished_asset_other_than_an_empty_starter_fails_and_deletes_nothing(self):
+        for state, size in (("starter", 5), ("open", 0)):
+            with self.subTest(state=state, size=size):
+                # Arrange
+                assets = [{"id": 9, "name": "Doka.Core.1.2.3.nupkg", "state": state, "size": size, "digest": None}]
+                api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                        f"repos/{REPOSITORY}/releases/7/assets": assets})
+                publication.run = listing_uploads(assets, self.uploads)
+
+                # Act
+                with self.assertRaises(publication.PublicationError) as raised:
+                    publication.stage(api, REPOSITORY, self.root)
+
+                # Assert
+                self.assertIn("neither uploaded nor an empty starter", str(raised.exception))
+                self.assertNotIn("DELETE", [method for method, _ in api.calls])
+
+
+class StageReadbackTests(unittest.TestCase):
+    """GitHub lists a new draft with a delay; the stage waits for it and never replaces an uploaded asset."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        candidate_directory(self.root)
+        self.release = {"id": 7, "tag_name": "v1.2.3", "name": "v1.2.3", "draft": True, "prerelease": False,
+                        "body": (self.root / publication.NOTES).read_text(encoding="utf-8")}
+        self.assets = []
+        self.commands = []
+        self.sleeps = []
+        original = publication.run
+        self.addCleanup(lambda: setattr(publication, "run", original))
+        uploads = listing_uploads(self.assets)
+        publication.run = lambda command, **kwargs: self.commands.append(command[:3]) or uploads(command)
+
+    def tearDown(self):
+        self.directory.cleanup()
+
+    def lagging_api(self, *, hidden_releases):
+        """Return a fake API whose release listing omits the draft for the given number of reads, as GitHub's can."""
+        release, reads = self.release, {"releases": 0}
+
+        class Api(FakeApi):
+            def request(inner, route, method="GET", payload=None):
+                if route.startswith(f"repos/{REPOSITORY}/releases?"):
+                    reads["releases"] += 1
+                    return [release] if reads["releases"] > hidden_releases else []
+
+                return FakeApi.request(inner, route, method, payload)
+
+        return Api({f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+
+    def test_new_draft_listed_late_is_staged(self):
+        # Arrange
+        api = self.lagging_api(hidden_releases=3)
+
+        # Act
+        result = publication.stage(api, REPOSITORY, self.root, sleep=self.sleeps.append)
+
+        # Assert
+        self.assertIn(["gh", "release", "create"], self.commands)
+        self.assertEqual(publication.CANDIDATE, result["uploaded"][-1])
+        self.assertEqual([10, 10], self.sleeps)
+
+    def test_new_draft_never_listed_fails_after_the_budget(self):
+        # Arrange
+        api = self.lagging_api(hidden_releases=10 ** 6)
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.stage(api, REPOSITORY, self.root, attempts=3, sleep=self.sleeps.append)
+
+        # Assert
+        self.assertIn("The new draft of v1.2.3 did not become visible in time", str(raised.exception))
+        self.assertEqual([10, 10], self.sleeps)
+
+    def test_complete_draft_listed_without_its_manifest_is_not_changed(self):
+        # Arrange
+        sbom = self.root / "Doka.Core.spdx.json"
+        self.assets.append({"id": 1, "name": sbom.name, "state": "uploaded", "size": sbom.stat().st_size,
+                            "digest": "sha256:" + "0" * 64})
+        # The listing lags and omits candidate.json, which the complete draft holds; this attempt built other SBOMs.
+        api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
+                                f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.stage(api, REPOSITORY, self.root, sleep=self.sleeps.append)
+
+        # Assert
+        self.assertIn("Doka.Core.spdx.json of the draft differs", str(raised.exception))
+        self.assertEqual(([], []), ([call for call in api.calls if call[0] == "DELETE"],
+                                    [command for command in self.commands if command[2] == "upload"]))
+
+
+class AssembleCandidateTests(unittest.TestCase):
+    """The stage job rebuilds the attested candidate from the text handoff and the packages artifact."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name)
+        self.source, self.packages, self.handoff, self.output = (base / name for name in
+                                                                  ("source", "packages", "handoff", "output"))
+        self.source.mkdir()
+        self.packages.mkdir()
+        manifest = candidate_directory(self.source)
+        (self.handoff / "candidate").mkdir(parents=True)
+        for name in (publication.CANDIDATE, publication.NOTES, publication.PROBES):
+            shutil.copyfile(self.source / name, self.handoff / "candidate" / name)
+        publication.write_sbom_handoff(manifest, self.source, self.handoff / "sbom-handoff" / "sboms.json")
+        for name in ("Doka.Core.1.2.3.nupkg", "Doka.Core.1.2.3.snupkg"):
+            shutil.copyfile(self.source / name, self.packages / name)
+
+    def test_candidate_is_rebuilt_byte_for_byte(self):
+        # Act
+        names = publication.assemble_candidate(self.handoff, self.packages, self.output)
+
+        # Assert
+        self.assertEqual(sorted(path.name for path in self.output.iterdir()), names)
+        for name in names:
+            self.assertEqual((self.source / name).read_bytes(), (self.output / name).read_bytes())
+
+    def test_other_symbol_package_fails(self):
+        # Arrange
+        (self.packages / "Doka.Core.1.2.3.snupkg").write_bytes(b"other")
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.assemble_candidate(self.handoff, self.packages, self.output)
+
+        # Assert
+        self.assertIn("does not hold the attested candidate: Doka.Core.1.2.3.snupkg", str(raised.exception))
+
+    def test_other_package_fails(self):
+        # Arrange
+        (self.packages / "Doka.Core.1.2.3.nupkg").write_bytes(b"other")
+
+        # Act
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.assemble_candidate(self.handoff, self.packages, self.output)
+
+        # Assert
+        self.assertIn("Doka.Core.1.2.3.nupkg differs from the candidate", str(raised.exception))
+
+
+class DraftAssetProblemTests(unittest.TestCase):
+    def test_unfinished_asset_is_a_problem_without_a_download(self):
+        # Arrange
+        assets = {"a.json": {"id": 9, "name": "a.json", "state": "starter", "size": 0, "digest": None}}
+        original = publication.asset_bytes
+        self.addCleanup(lambda: setattr(publication, "asset_bytes", original))
+        publication.asset_bytes = lambda repository, asset: self.fail("A starter asset was downloaded.")
+
+        # Act
+        problems = publication.draft_asset_problems(REPOSITORY, assets, {"a.json": "0" * 64})
+
+        # Assert
+        self.assertEqual(["a.json"], problems)
 
 
 class AttestationExistsTests(unittest.TestCase):
@@ -1232,24 +1414,40 @@ class SbomHandoffTests(unittest.TestCase):
         self.assertIn("differs from the candidate", str(raised.exception))
 
 
-class PendingPackagesTests(unittest.TestCase):
-    def run_pending(self, states, served):
-        from tools.release_publication import __main__ as cli
+MANIFEST = {"tag": "v1.0.0", "symbols": [],
+            "packages": [{"id": name, "nupkg": f"{name}.1.0.0.nupkg", "snupkg": f"{name}.1.0.0.snupkg"}
+                         for name in ("Doka.Core", "Doka.Ext")]}
 
+
+def symbol_patches(served, published):
+    """Patch the candidate check, the release lookup and the symbol server for the symbol commands."""
+    return (unittest.mock.patch.object(publication, "verify_candidate", lambda repository, path: MANIFEST),
+            unittest.mock.patch.object(publication, "release_for", lambda api, repository, tag: {
+                "tag_name": tag, "draft": not published}),
+            unittest.mock.patch.object(nuget, "pending_symbols", lambda rows, probes, **options: [
+                row for row in rows if row["id"] not in served]),
+            unittest.mock.patch.object(cli_module(), "GitHub", lambda: None))
+
+
+def cli_module():
+    from tools.release_publication import __main__ as cli
+
+    return cli
+
+
+class PendingPackagesTests(unittest.TestCase):
+    def run_pending(self, states, served, published=False):
         directory = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, directory, True)
-        manifest = {"packages": [{"id": name, "nupkg": f"{name}.1.0.0.nupkg", "snupkg": f"{name}.1.0.0.snupkg"}
-                                 for name in ("Doka.Core", "Doka.Ext")], "symbols": []}
         output = directory / "github-output.txt"
-        with unittest.mock.patch.object(publication, "verify_candidate", lambda repository, path: manifest), \
+        verify, release, symbols, github = symbol_patches(served, published)
+        with verify, release, symbols, github, \
                 unittest.mock.patch.object(nuget, "availability", lambda path, rows: [
                     {"id": name, "state": state} for name, state in states.items()]), \
-                unittest.mock.patch.object(nuget, "pending_symbols", lambda rows, probes: [
-                    row for row in rows if row["id"] not in served]), \
                 unittest.mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": REPOSITORY,
                                                         "GITHUB_OUTPUT": str(output)}):
-            cli.main(["pending-packages", "--candidate", str(directory), "--output", str(directory / "p.txt"),
-                      "--symbols-output", str(directory / "s.txt")])
+            cli_module().main(["pending-packages", "--candidate", str(directory), "--output",
+                               str(directory / "p.txt"), "--symbols-output", str(directory / "s.txt")])
 
         return ((directory / "p.txt").read_text(encoding="ascii").split(),
                 (directory / "s.txt").read_text(encoding="ascii").split(), output.read_text(encoding="ascii"))
@@ -1276,6 +1474,28 @@ class PendingPackagesTests(unittest.TestCase):
         self.assertEqual(([], ["Doka.Ext.1.0.0.snupkg"]), (primaries, symbols))
         self.assertEqual("push=true\n", output)
 
+    def test_published_release_pushes_no_symbols_although_a_pdb_is_not_served(self):
+        # Arrange
+        states = {"Doka.Core": "matching", "Doka.Ext": "matching"}
+
+        # Act
+        primaries, symbols, output = self.run_pending(states, set(), published=True)
+
+        # Assert
+        self.assertEqual(([], []), (primaries, symbols))
+        self.assertEqual("push=false\n", output)
+
+    def test_published_release_pushes_no_primary_although_nuget_answers_404(self):
+        # Arrange
+        states = {"Doka.Core": "absent", "Doka.Ext": "matching"}
+
+        # Act
+        primaries, symbols, output = self.run_pending(states, {"Doka.Core", "Doka.Ext"}, published=True)
+
+        # Assert
+        self.assertEqual(([], []), (primaries, symbols))
+        self.assertEqual("push=false\n", output)
+
     def test_only_absent_primaries_are_pending(self):
         # Arrange
         states = {"Doka.Core": "matching", "Doka.Ext": "absent"}
@@ -1288,6 +1508,47 @@ class PendingPackagesTests(unittest.TestCase):
         self.assertEqual(["Doka.Ext.1.0.0.snupkg"], symbols)
         self.assertEqual("push=true\n", output)
 
+
+
+class SymbolPendingTests(unittest.TestCase):
+    """Right before each symbol push, the symbol server and the release are asked again for that package."""
+
+    def pending(self, package, served, published=False):
+        verify, release, symbols, github = symbol_patches(served, published)
+        stream = __import__("io").StringIO()
+        with verify, release, symbols, github, unittest.mock.patch("sys.stdout", stream), \
+                unittest.mock.patch.dict("os.environ", {"GITHUB_REPOSITORY": REPOSITORY}):
+            code = cli_module().main(["symbol-pending", "--candidate", ".", "--package", package])
+
+        return code, stream.getvalue().strip()
+
+    def test_symbol_package_not_served_is_pending(self):
+        # Act
+        result = self.pending("Doka.Ext.1.0.0.snupkg", {"Doka.Core"})
+
+        # Assert
+        self.assertEqual((0, "true"), result)
+
+    def test_symbol_package_served_since_the_list_is_not_pushed(self):
+        # Act
+        result = self.pending("Doka.Ext.1.0.0.snupkg", {"Doka.Core", "Doka.Ext"})
+
+        # Assert
+        self.assertEqual((0, "false"), result)
+
+    def test_symbol_package_of_a_published_release_is_not_pushed(self):
+        # Act
+        result = self.pending("Doka.Ext.1.0.0.snupkg", set(), published=True)
+
+        # Assert
+        self.assertEqual((0, "false"), result)
+
+    def test_unknown_symbol_package_fails(self):
+        # Act
+        code, _ = self.pending("Other.1.0.0.snupkg", set())
+
+        # Assert
+        self.assertNotEqual(0, code)
 
 class UnusedVersionTests(unittest.TestCase):
     def test_present_version_is_reported(self):
@@ -1438,17 +1699,19 @@ class StageWithoutDigestTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
-    def test_same_size_other_bytes_of_an_unfinished_attempt_are_replaced(self):
+    def test_same_size_other_bytes_without_a_manifest_fail_and_delete_nothing(self):
         # Arrange
         api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": [self.release],
                                 f"repos/{REPOSITORY}/releases/7/assets": self.assets})
+        publication.run = listing_uploads(self.assets)
 
         # Act
-        result = publication.stage(api, REPOSITORY, self.root)
+        with self.assertRaises(publication.PublicationError) as raised:
+            publication.stage(api, REPOSITORY, self.root)
 
         # Assert
-        self.assertIn(("DELETE", f"repos/{REPOSITORY}/releases/assets/1"), api.calls)
-        self.assertIn("Doka.Core.spdx.json", result["uploaded"])
+        self.assertIn("Doka.Core.spdx.json of the draft differs", str(raised.exception))
+        self.assertNotIn("DELETE", [method for method, _ in api.calls])
 
     def test_same_size_other_bytes_of_a_complete_candidate_fail(self):
         # Arrange
@@ -1529,13 +1792,19 @@ class ProbeConsistencyTests(unittest.TestCase):
 
 class TagReadinessTests(unittest.TestCase):
     def run_check(self, *, tag_taken=False, other_tags=(), taken=False, draft_commit=COMMIT, failure=None,
-                  signers="principal namespaces=\"git\" ssh-ed25519 K\n"):
+                  failing_attempts=None, hidden_drafts=0, signers="principal namespaces=\"git\" ssh-ed25519 K\n"):
         manifest = json.dumps({"commit": draft_commit, "version": "1.2.3"}).encode()
         checked = []
+        self.sleeps = []
+        listings = []
+
+        def release_for(api, repository, tag):
+            listings.append(tag)
+            return {"id": 7, "draft": True, "tag_name": tag} if len(listings) > hidden_drafts else None
 
         def complete(api, repository, release, verify=None):
             checked.append(release["id"])
-            if failure is not None:
+            if failure is not None and (failing_attempts is None or len(checked) <= failing_attempts):
                 raise failure
 
         patches = {
@@ -1545,14 +1814,14 @@ class TagReadinessTests(unittest.TestCase):
             "current_signers": lambda api, repository, commit: signers if commit == "m" * 40 else "",
             "tag_exists": lambda api, repository, tag: tag_taken,
             "tags_on_commit": lambda root, commit: list(other_tags),
-            "release_for": lambda api, repository, tag: {"id": 7, "draft": True, "tag_name": tag},
+            "release_for": release_for,
             "release_assets": lambda api, repository, release: {publication.CANDIDATE: {"id": 1, "size": 1}},
             "asset_bytes": lambda repository, asset: manifest, "require_complete_draft": complete}
         environment = {"GITHUB_REPOSITORY": REPOSITORY, "GITHUB_SHA": COMMIT}
         with unittest.mock.patch.multiple(publication, **patches), \
                 unittest.mock.patch.object(publication.nuget, "unused",
                                            return_value={"Doka.Core": "listed" if taken else "absent"}):
-            result = publication.tag_readiness(None, environment, Path("."), "1.2.3")
+            result = publication.tag_readiness(None, environment, Path("."), "1.2.3", sleep=self.sleeps.append)
 
         return result, checked
 
@@ -1571,6 +1840,26 @@ class TagReadinessTests(unittest.TestCase):
         self.assertEqual(expected, [item["subject"] for item in result["checks"]])
         self.assertEqual((0, "v1.2.3", COMMIT), (result["failures"], result["tag"], result["commit"]))
         self.assertEqual([7], checked)
+
+    def test_draft_listed_on_a_later_attempt_passes(self):
+        # Arrange
+        hidden_drafts = 2
+
+        # Act
+        result, checked = self.run_check(hidden_drafts=hidden_drafts)
+
+        # Assert
+        self.assertEqual((0, [7], [10, 10]), (result["failures"], checked, self.sleeps))
+
+    def test_draft_verified_on_a_later_attempt_passes(self):
+        # Arrange
+        failure = GitHubError("No valid spdx attestation for Doka.Core.1.2.3.nupkg.", code="failed")
+
+        # Act
+        result, checked = self.run_check(failure=failure, failing_attempts=2)
+
+        # Assert
+        self.assertEqual((0, [7, 7, 7], [10, 10]), (result["failures"], checked, self.sleeps))
 
     def test_independent_failures_are_all_reported(self):
         # Arrange
@@ -1613,10 +1902,11 @@ class TagReadinessTests(unittest.TestCase):
         failure = publication.PublicationError("The draft of v1.2.3 cannot be published (No SBOM attestation).")
 
         # Act
-        result, _ = self.run_check(failure=failure)
+        result, checked = self.run_check(failure=failure)
 
         # Assert
         self.assertIn("No SBOM attestation", self.failed(result)["Draft passes publish verification"])
+        self.assertEqual((6, [10] * 5), (len(checked), self.sleeps))
 
 
 class TagReportTests(unittest.TestCase):

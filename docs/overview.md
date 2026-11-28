@@ -298,7 +298,9 @@ flowchart TB
   qual --> only{"qualification-only?"}
   only -- yes --> done1(["end: qualified, never published"])
   only -- no --> cand["release-candidate / Candidate<br/>see 12"]
+  cand --> stg["release-candidate / Stage<br/>the candidate's assets in the draft"]
   cand --> sbom["release-candidate / SBOM<br/>one SBOM attestation per package"]
+  stg --> check
   sbom --> check["release-candidate / Tag check<br/>tag and version unused, draft passes<br/>the publish verification"]
   check --> tag["maintainer: SSH-signed annotated tag v&lt;version&gt;<br/>on the candidate commit, git tag -v, push the tag"]
   tag --> approve["environment approval"]
@@ -350,15 +352,15 @@ flowchart TB
 ```mermaid
 flowchart TB
   accTitle: Candidate job
-  accDescr: The packages are checked, restored in consumers, described by SBOMs, attested and staged in a draft release.
+  accDescr: The packages are checked, restored in consumers, described by SBOMs and attested; the stage job puts exactly these files in a draft release.
   c1["download the packages artifact"] --> c2["install sbom-tool 4.1.5, checksum-verified"]
   c2 --> c3["per package: isolated consumer restores it from<br/>a feed of the candidate packages only,<br/>restored archives byte-identical to the candidate,<br/>no test or build tooling in the graph"]
   c3 --> c4["per package: SPDX 2.2 SBOM from that consumer,<br/>validated by sbom-tool, exact dependency closure,<br/>describes exactly the candidate archive"]
   c4 --> c5["exact pin where a package grants internals,<br/>Portable PDBs match their assemblies,<br/>symbol probes derived (tools/NuGetSymbols)"]
   c5 --> c6["packages bound to repository and commit,<br/>exactly release.packages, versions unused,<br/>write candidate.json"]
   c6 --> c7[("attest SLSA provenance<br/>packages and candidate.json")]
-  c7 --> c8[("artifact release-candidate-sboms-&lt;version&gt;<br/>sboms.json: every SBOM with its digest<br/>and its package's digest")]
-  c8 --> c9["stage: draft created if missing, title, notes and<br/>prerelease flag equal; one stage per version at a time;<br/>with candidate.json in the draft every asset must be<br/>equal (hashed when GitHub reports no digest), without it<br/>differing assets of an unfinished attempt are replaced;<br/>candidate.json last"]
+  c7 --> c8[("artifact release-candidate-&lt;version&gt;-attempt-&lt;n&gt;<br/>candidate.json, release notes, symbol probes,<br/>sboms.json; named in the job's outputs")]
+  c8 --> c9["Stage job: rebuild the candidate from this artifact<br/>and the packages artifact, every digest as attested;<br/>draft created if missing, title, notes and<br/>prerelease flag equal; one stage per version at a time;<br/>every uploaded asset must equal the candidate<br/>(hashed when GitHub reports no digest) and is never<br/>deleted; only empty starter assets are deleted;<br/>candidate.json last; waits up to 30 x 10 s until GitHub<br/>lists a new draft"]
   c8 --> s1["SBOM job per package: packages artifact and sboms.json,<br/>write the SBOM, both digests equal the candidate"] --> s2[("attest SPDX SBOM, subject: .nupkg")]
 ```
 
@@ -402,9 +404,11 @@ flowchart LR
   build["product build"] --> pa[("packages artifact")] --> cand["Candidate"]
   tests["product tests"] --> trx[("TRX artifacts")] --> qual["Qualification"]
   tests --> cob[("Cobertura artifacts")] --> cov["coverage-gate"]
-  cand --> sa[("release-candidate-sboms-&lt;version&gt;<br/>sboms.json")] --> sbom["SBOM jobs"]
+  cand --> sa[("release-candidate-&lt;version&gt;-attempt-&lt;n&gt;<br/>candidate text files, sboms.json")] --> sbom["SBOM jobs"]
+  sa --> stage["Stage"]
+  pa --> stage
   pa --> sbom
-  cand --> draft[("draft release<br/>candidate.json, .nupkg, .snupkg, .spdx.json,<br/>release-notes.md, symbol-probes.json")]
+  stage --> draft[("draft release<br/>candidate.json, .nupkg, .snupkg, .spdx.json,<br/>release-notes.md, symbol-probes.json")]
   draft --> pub["Publish"]
   draft --> pretag["Tag check"]
   prat["PR attestation"] --> store[("GitHub attestations")]
@@ -469,10 +473,11 @@ flowchart TB
   accDescr: What a failure in each stage leaves behind and how the next run or rerun continues.
   f1["preflight fails"] --> x1["nothing written; fix line, notes or version,<br/>start a new run"]
   f2["product job or qualification fails"] --> x2["nothing published; re-run the failed jobs<br/>or start a new run"]
-  f3["Candidate fails"] --> x3["re-run: stage keeps matching assets, replaces<br/>those of the unfinished attempt and uploads<br/>candidate.json last; a complete candidate in<br/>the draft is never replaced"]
-  f4["SBOM job fails"] --> x4["re-run the failed SBOM jobs; whether they find<br/>the Candidate's artifact of the earlier attempt<br/>is not documented. Otherwise delete the draft<br/>and start a new run"]
+  f3["Candidate fails"] --> x3["re-run: nothing is staged yet; the new attempt<br/>builds its own candidate artifact"]
+  f3s["Stage fails"] --> x3s["re-run the failed jobs: the stage reads the same<br/>candidate artifact, keeps matching assets, deletes only<br/>empty starter assets and uploads candidate.json last;<br/>an asset that differs stops it: delete the draft and<br/>start a new run"]
+  f4["SBOM job fails"] --> x4["re-run the failed SBOM jobs: they read the same<br/>candidate artifact, because jobs that are not re-run<br/>keep their outputs"]
   f5["run cancelled or gone after the draft exists"] --> x5["new run of the same version: preflight resumes<br/>at publication only for a complete draft,<br/>otherwise it stops and names what is missing"]
-  f6["publish stops before or during the push"] --> x6["re-run: primaries already on nuget.org with the<br/>candidate bytes are skipped, every symbol<br/>package is pushed again (409 is a warning)"]
+  f6["publish stops before or during the push"] --> x6["re-run: primaries already on nuget.org with the<br/>candidate bytes are skipped; a symbol package is<br/>pushed only while its PDBs are not served, asked<br/>again right before its push, never after the<br/>release is published"]
   f7["nuget.org not serving within one hour"] --> x7["job ends without failure, draft stays;<br/>re-run later"]
   f8["one maintenance line fails"] --> x8["coordinator reports it; the other lines<br/>are still dispatched and checked"]
 ```
