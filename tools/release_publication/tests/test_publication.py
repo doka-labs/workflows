@@ -1647,6 +1647,27 @@ class PublishCurrentDraftTests(unittest.TestCase):
         self.assertEqual([("GET", f"repos/{REPOSITORY}/releases?per_page=100&page=1"),
                           ("GET", f"repos/{REPOSITORY}/releases/latest")], api.calls)
 
+    def test_recheck_requires_a_confirmed_draft_before_a_push(self):
+        # Arrange
+        from tools.release_publication import __main__ as cli
+
+        published = {**self.release, "draft": False, "immutable": True}
+        cases = {"published": [published], "missing": []}
+        for case, releases in cases.items():
+            with self.subTest(case=case):
+                api = RecordingFakeApi({f"repos/{REPOSITORY}/releases": releases})
+                mock = unittest.mock
+
+                # Act
+                with mock.patch.dict(cli.os.environ, {"GITHUB_REPOSITORY": REPOSITORY}), \
+                        mock.patch.object(cli, "GitHub", return_value=api), \
+                        mock.patch.object(publication, "authorize", return_value=self.manifest):
+                    result = cli.main(["recheck", "--root", str(self.root), "--candidate", str(self.root)])
+
+                # Assert
+                self.assertEqual(1, result)
+                self.assertEqual([("GET", f"repos/{REPOSITORY}/releases?per_page=100&page=1")], api.calls)
+
     def test_draft_changed_after_verification_is_not_published(self):
         # Arrange
         self.assets[0]["digest"] = "sha256:" + "0" * 64

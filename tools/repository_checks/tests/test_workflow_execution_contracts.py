@@ -100,7 +100,7 @@ class WorkflowExecutionContractTests(unittest.TestCase):
         for loop in push.split("done < ")[:2]:
             self.assertLess(loop.rindex("recheck"), loop.index("dotnet nuget push"))
         symbol_loop = push.split("done < ")[1]
-        self.assertLess(symbol_loop.index("symbol-pending"), symbol_loop.index("dotnet nuget push"))
+        self.assertLess(symbol_loop.index("symbol-pending"), symbol_loop.rindex("recheck"))
 
     def test_stage_and_sbom_jobs_read_the_attested_candidate_of_its_attempt(self):
         # Arrange

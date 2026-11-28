@@ -38,8 +38,9 @@ entries stay under Unreleased.
 - A symbol package was pushed from a list made before all pushes, and a 404 of
   nuget.org or its symbol server could push a package or a symbol package
   again after the release was published. Each symbol package is now asked for
-  again right before its push, and a run that finds the release published
-  pushes nothing.
+  again before its push, a run that finds the release published pushes
+  nothing, and the recheck right before every push and before the credential
+  requires a confirmed draft.
 - The candidate job generated the SBOMs and staged them in one job, so a
   re-run after a failed upload built other SBOMs, which the draft refuses. As
   in MySql and SafeMigrations, the candidate job hands its attested text files

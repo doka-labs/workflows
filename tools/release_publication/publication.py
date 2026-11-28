@@ -750,18 +750,19 @@ def pending_symbol_packages(api, repository: str, manifest: dict, selected: list
 
 
 def check_publish_target(api, repository: str, manifest: dict, directory: Path) -> None:
-    """Check the destination before NuGet receives any package."""
+    """Check, right before a NuGet credential is requested or a package is pushed, that the draft still waits."""
     release = release_for(api, repository, manifest["tag"])
-    require(release is not None, f"The draft of {manifest['tag']} is missing.")
+    # WHY: A published release ends every write to nuget.org (release_published), and the release can be published
+    # between the push lists and a push, so each write needs a draft confirmed right before it; a missing release
+    # stops the push as well. https://docs.github.com/en/rest/releases/releases#update-a-release
+    require(release is not None and release.get("draft") is True,
+            f"{manifest['tag']} is no longer a draft; nothing is pushed to nuget.org.")
     require_release_metadata(release, manifest, (directory / NOTES).read_text(encoding="utf-8"))
-    if release.get("draft"):
-        # WHY: An existing Latest can predate the repository's immutability setting. Resolve that policy check
-        # before pushing any NuGet version, and resolve it again immediately before publication.
-        # https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes
-        # https://learn.microsoft.com/en-us/nuget/nuget-org/policies/deleting-packages
-        latest_flag(api, repository, manifest["version"])
-    else:
-        require(release.get("immutable") is True, f"The published release of {manifest['tag']} is not immutable.")
+    # WHY: An existing Latest can predate the repository's immutability setting. Resolve that policy check before
+    # pushing any NuGet version, and resolve it again immediately before publication.
+    # https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/establish-provenance-and-integrity/prevent-release-changes
+    # https://learn.microsoft.com/en-us/nuget/nuget-org/policies/deleting-packages
+    latest_flag(api, repository, manifest["version"])
 
     expected = {**expected_assets(manifest), CANDIDATE: packages.sha256(directory / CANDIDATE)}
     problems = draft_asset_problems(repository, release_assets(api, repository, release), expected)
