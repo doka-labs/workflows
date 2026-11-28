@@ -68,9 +68,12 @@ def verify(subject: Path, repository: str, predicate_type: str, *, signer: str |
     if signer is None and predicate_type not in SIGNERS:
         raise GitHubError(f"No signer is known for {predicate_type}; name the signing workflow.", code="failed")
 
+    # WHY: gh fetches at most --limit attestations of the subject, 30 by default and 1000 at most, before the
+    # callers select the one of their run; with the default, the 31st attestation of a subject was never seen.
+    # https://github.com/cli/cli/blob/v2.104.0/pkg/cmd/attestation/api/client.go#L21-L24
     command = ["gh", "attestation", "verify", str(subject), "--repo", repository,
                "--predicate-type", predicate_type, "--signer-workflow", signer or SIGNERS[predicate_type],
-               "--deny-self-hosted-runners", "--format", "json"]
+               "--deny-self-hosted-runners", "--limit", "1000", "--format", "json"]
     # WHY: --source-digest and --source-ref "Enforce that the digest / git ref associated with the source repository
     # matches the provided value". https://cli.github.com/manual/gh_attestation_verify
     if source_digest:

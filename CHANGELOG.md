@@ -12,6 +12,50 @@ entries stay under Unreleased.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-28
+
+### Fixed
+
+- The candidate job failed with "The new draft of v<version> is not visible
+  yet" when GitHub had not listed a release right after `gh release create`.
+  It now waits for the new draft up to 30 times 10 seconds, as SafeMigrations
+  does.
+- The stage deleted and replaced an uploaded asset that differed from the
+  candidate whenever the listing showed no `candidate.json`. A listing that
+  lagged could so replace an SBOM of a complete draft and leave its manifest
+  naming removed bytes. As in MySql, an uploaded asset is never deleted now;
+  one that differs stops the stage, and the remedy is a new draft. Only
+  empty `starter` assets are deleted; any other unfinished asset stops the
+  stage, and none counts as complete or is downloaded.
+- The `Tag check` read the draft and its attestations once, about a second
+  after the SBOM jobs attested them; MySql, SafeMigrations and NestedSet
+  verify against the bundle the attesting job wrote. Both draft checks are now
+  repeated every 10 seconds for up to a minute while they fail, so a lagging
+  listing or an older attestation of the same package found first cannot end
+  them early.
+- `gh attestation verify` fetched at most 30 attestations of a subject before
+  the release code selected the one of its run; it now fetches up to 1000.
+- A symbol package was pushed from a list made before all pushes, and a 404 of
+  nuget.org or its symbol server could push a package or a symbol package
+  again after the release was published. Each symbol package is now asked for
+  again before its push, a run that finds the release published pushes
+  nothing, and the recheck right before every push and before the credential
+  requires a confirmed draft.
+- The candidate job generated the SBOMs and staged them in one job, so a
+  re-run after a failed upload built other SBOMs, which the draft refuses. As
+  in MySql and SafeMigrations, the candidate job hands its attested text files
+  to a separate stage job as an artifact of its attempt, and the stage job
+  rebuilds the candidate from them and the packages artifact with every
+  attested digest; a re-run of the stage or SBOM jobs reads the same files.
+- The package validation built each project with the pack's configuration and
+  version on a restore without them, which fails with `NETSDK1005` when the
+  target framework depends on them. Each project is now restored in locked
+  mode with the same properties right before its build.
+- The API reference split the project list at spaces, and a re-run of its
+  build uploaded a second `github-pages` artifact that `deploy-pages` refuses.
+  The projects are passed as a JSON array, and every build attempt uploads its
+  own artifact, whose name the deploy job takes from the build.
+
 ## [0.6.1] - 2026-11-27
 
 ### Fixed

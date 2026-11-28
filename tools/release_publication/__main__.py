@@ -105,6 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     extract.add_argument("--handoff", type=Path, required=True)
     extract.add_argument("--package", required=True)
     extract.add_argument("--packages", type=Path, required=True)
+    assemble = commands.add_parser("assemble-candidate",
+                                   help="Rebuild the candidate directory from the handoff and the packages.")
+    assemble.add_argument("--handoff", type=Path, required=True)
+    assemble.add_argument("--packages", type=Path, required=True)
+    assemble.add_argument("--output", type=Path, required=True)
     pre_tag = commands.add_parser(
         "pre-tag", help="Check locally, before the candidate starts, that the checkout can be released; no writes.")
     pre_tag.add_argument("--root", type=Path, required=True, help="Checkout of the product repository.")
@@ -130,6 +135,10 @@ def main(argv: list[str] | None = None) -> int:
     pending.add_argument("--output", type=Path, required=True, help="Primary packages nuget.org does not hold.")
     pending.add_argument("--symbols-output", type=Path, required=True,
                          help="Symbol packages whose PDBs are not served yet.")
+    symbol = commands.add_parser("symbol-pending",
+                                 help="Print true while a symbol package of the candidate still needs a push.")
+    symbol.add_argument("--candidate", type=Path, required=True)
+    symbol.add_argument("--package", required=True, help="File name of the .snupkg.")
     readback = commands.add_parser("readback")
     readback.add_argument("--candidate", type=Path, required=True)
     readback.add_argument("--work", type=Path, required=True)
@@ -200,6 +209,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Wrote {path.name}.")
             return 0
 
+        if args.command == "assemble-candidate":
+            names = publication.assemble_candidate(args.handoff.resolve(), args.packages.resolve(),
+                                                   args.output.resolve())
+            print(f"Assembled {len(names)} candidate files.")
+            return 0
+
         if args.command == "pre-tag":
             result = publication.pre_tag(api, args.root.resolve(), args.version)
             print(_pre_tag_report(result), end="")
@@ -248,18 +263,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "pending-packages":
             states = nuget.availability(args.candidate.resolve(), manifest["packages"])
             absent = [item["id"] for item in states if item["state"] == "absent"]
-            rows = [package for package in manifest["packages"] if package["id"] in absent]
+            published = publication.release_published(api, environment["GITHUB_REPOSITORY"], manifest)
+            rows = [] if published else [package for package in manifest["packages"] if package["id"] in absent]
             # WHY: Every primary package before every symbol package, each list in dependency order (NestedSet).
             # A symbol package is listed while its Portable PDBs are not served yet, also when its primary is already
             # on nuget.org, so an attempt that stopped between the two pushes still delivers it. One whose PDBs are
             # served is left out: nuget.org would accept it again and replace the available one (MySql's preflight
             # pushes only missing symbols and requests a key only when anything is missing).
-            symbols = nuget.pending_symbols(manifest["packages"], manifest["symbols"])
+            symbols = publication.pending_symbol_packages(api, environment["GITHUB_REPOSITORY"], manifest,
+                                                          manifest["packages"])
             args.output.write_text("".join(f"{row['nupkg']}\n" for row in rows), encoding="ascii")
             args.symbols_output.write_text("".join(f"{row['snupkg']}\n" for row in symbols), encoding="ascii")
             _output("push", "true" if rows or symbols else "false")
             print(f"{len(rows)} of {len(manifest['packages'])} primary packages still need to be pushed.")
             print(f"{len(symbols)} of {len(manifest['packages'])} symbol packages still need to be pushed.")
+            return 0
+
+        if args.command == "symbol-pending":
+            selected = [package for package in manifest["packages"] if package["snupkg"] == args.package]
+            if len(selected) != 1:
+                raise publication.PublicationError(f"{args.package} is not a symbol package of the candidate.")
+
+            pending = publication.pending_symbol_packages(api, environment["GITHUB_REPOSITORY"], manifest, selected)
+            print("true" if pending else "false")
             return 0
 
         if args.command == "readback":

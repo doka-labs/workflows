@@ -639,15 +639,21 @@ between them:
    requires the restored archives to be byte-identical, generates one SPDX 2.2
    SBOM per package from that consumer with `sbom-tool` 4.1.5 and validates it,
    verifies each Portable PDB against its assembly (`tools/NuGetSymbols`),
-   attests build provenance and the SBOMs, and stores the candidate as a draft
-   release. It requires an exact pin `[<version>]` wherever a package depends
+   attests build provenance and the SBOMs, and hands the candidate's text files
+   to the stage and SBOM jobs as an artifact of its attempt. The stage job
+   rebuilds the candidate from them and the packages artifact, every file with
+   its attested digest, and stores it as a draft release; after `gh release create` it waits up to 30
+   times 10 seconds until GitHub lists the new draft, and it never deletes or
+   replaces an uploaded asset, so a re-run of a failed stage job uploads the
+   same bytes. It requires an exact pin `[<version>]` wherever a package depends
    on another package of the candidate whose assemblies grant it their
    internals (`InternalsVisibleTo`).
-5. The `Tag check` job of `release-candidate.yml`, after the SBOM jobs, checks
+5. The `Tag check` job of `release-candidate.yml`, after the stage and SBOM jobs, checks
    in the same run, and so with the `doka-labs/workflows` version the release
    line pins: the changelog section, the tag and the version still unused, no
    other version tag on the commit, the draft holding this run's candidate and
-   passing the publish job's verification, and a key in
+   passing the publish job's verification (both draft checks are repeated
+   every 10 seconds for up to a minute while they fail), and a key in
    `.github/allowed_signers` of the current head of `main`. The draft exists
    only in this run, and the other checks are repeated because the line or
    nuget.org can change after the local check. Its summary lists one line `OK` or `FAIL` per check.

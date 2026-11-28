@@ -38,6 +38,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
+      artifact: ${{ steps.artifact.outputs.name }}
 
     steps:
       # WHY: The pinned DocFX archive contains a Linux x64 executable.
@@ -132,20 +133,32 @@ jobs:
           PACK_CONFIGURATION: ${{ inputs.pack-configuration }}
           TAG: ${{ inputs.tag }}
         run: |
-          for project in $PROJECTS; do
+          while IFS= read -r project; do
             dotnet restore "$project" -p:ContinuousIntegrationBuild=true "-p:Configuration=$PACK_CONFIGURATION" \
               "-p:Version=${TAG#v}" "-p:PackageVersion=${TAG#v}"
-          done
+          done < <(jq -r '.[]' <<<"$PROJECTS")
 
       # WHY: Warnings fail the build, so a missing XML comment or a broken link never reaches the published site.
       - name: Build the site
         working-directory: repository
         run: '"$RUNNER_TEMP/docfx/docfx" .docfx/docfx.json --warningsAsErrors'
 
+      # WHY: Artifacts of earlier attempts stay in the run, and deploy-pages stops when more than one artifact
+      # carries its name, so every attempt of this job uploads its own; the deploy job takes the name from this
+      # job's outputs, so a deploy that is re-run alone still finds the site its build uploaded.
+      # https://github.com/actions/deploy-pages/blob/368f82528645a54fb793d4d04e342629a3f51346/src/internal/api-client.js#L72-L82
+      - name: Name the site artifact
+        if: steps.decide.outputs.deploy == 'true'
+        id: artifact
+        env:
+          ATTEMPT: ${{ github.run_attempt }}
+        run: echo "name=github-pages-$ATTEMPT" >> "$GITHUB_OUTPUT"
+
       - name: Upload the site
         if: steps.decide.outputs.deploy == 'true'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
+          name: ${{ steps.artifact.outputs.name }}
           path: repository/.docfx/_site
 
   deploy:
@@ -199,3 +212,5 @@ jobs:
         if: steps.decide.outputs.deploy == 'true'
         id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: ${{ needs.build.outputs.artifact }}
